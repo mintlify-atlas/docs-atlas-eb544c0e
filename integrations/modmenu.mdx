@@ -1,0 +1,442 @@
+---
+title: "ModMenu Integration"
+description: "In-game configuration screen for Voxy World Gen V2"
+---
+
+## Overview
+
+Voxy World Gen V2 integrates with [ModMenu](https://modrinth.com/mod/modmenu) to provide an intuitive in-game configuration screen. This integration uses [Cloth Config](https://modrinth.com/mod/cloth-config) to render a beautiful, user-friendly interface for all mod settings.
+
+## Accessing Configuration
+
+To access the configuration screen:
+
+<Steps>
+  <Step title="Open the Mods Menu">
+    Press **ESC** to open the game menu, then click **Mods**.
+  </Step>
+  
+  <Step title="Find Voxy World Gen V2">
+    Scroll through the mod list or search for **Voxy World Gen V2**.
+  </Step>
+  
+  <Step title="Open Configuration">
+    Click the **Config** button or the mod entry to open the configuration screen.
+  </Step>
+</Steps>
+
+<Tip>
+Changes are applied immediately when you click **Done**. You don't need to restart the game.
+</Tip>
+
+## Available Settings
+
+The configuration screen provides access to all Voxy World Gen V2 settings:
+
+### Enabled
+
+<ParamField path="enabled" type="boolean" default="true">
+  Master toggle for the entire mod.
+  
+  When disabled, Voxy World Gen V2 will not generate any LOD chunks. Existing chunks are unaffected.
+</ParamField>
+
+**Use cases:**
+- Temporarily disable LOD generation for troubleshooting
+- Reduce server load during events
+- Test performance impact of the mod
+
+### F3 Stats Display
+
+<ParamField path="showF3MenuStats" type="boolean" default="true">
+  Show generation statistics in the F3 debug screen.
+  
+  Displays:
+  - Active generation tasks
+  - Queue size
+  - Chunks generated per second
+  - Total chunks generated
+</ParamField>
+
+<Info>
+The F3 stats are useful for monitoring performance and understanding generation behavior.
+</Info>
+
+### Generation Radius
+
+<ParamField path="generationRadius" type="integer" default="128" min="1" max="512">
+  Maximum distance (in chunks) from players to generate LOD chunks.
+  
+  This defines how far ahead of players the system generates terrain.
+</ParamField>
+
+**Recommendations:**
+- **Low-end systems**: 64-96 chunks
+- **Mid-range systems**: 128-192 chunks
+- **High-end systems**: 192-256 chunks
+- **Tellus worlds**: 128+ chunks (enforced minimum)
+
+<Warning>
+Very large radii (>256) can cause memory issues on servers with many players.
+</Warning>
+
+### Update Interval
+
+<ParamField path="update_interval" type="integer" default="20" min="1" max="200">
+  How often (in ticks) to check for new chunks to generate.
+  
+  20 ticks = 1 second at normal game speed.
+</ParamField>
+
+**Impact:**
+- **Lower values (5-10)**: More responsive, higher CPU usage
+- **Default (20)**: Balanced performance
+- **Higher values (40-100)**: Lower CPU usage, slower response to player movement
+
+### Max Queue Size
+
+<ParamField path="maxQueueSize" type="integer" default="20000">
+  Maximum number of chunks that can be queued for generation.
+  
+  When the queue is full, new generation requests are ignored until space is available.
+</ParamField>
+
+**Memory impact:**
+- Each queued chunk uses approximately 100 bytes
+- Default (20,000) ≈ 2MB RAM
+- Maximum safe value: 50,000-100,000 depending on available RAM
+
+<Tip>
+If you see "queue full" warnings in logs, increase this value.
+</Tip>
+
+### Max Active Tasks
+
+<ParamField path="maxActiveTasks" type="integer" default="20" min="1" max="128">
+  Maximum number of chunks that can be generated simultaneously.
+  
+  This controls parallelism and directly impacts generation speed.
+</ParamField>
+
+**Optimal values:**
+- **Dual-core CPU**: 4-8 tasks
+- **Quad-core CPU**: 8-16 tasks
+- **6-8 core CPU**: 16-24 tasks
+- **12+ core CPU**: 24-48 tasks
+- **Tellus worlds**: 20-40 tasks (benefits from higher parallelism)
+
+<Warning>
+Setting this too high can cause frame drops and stuttering. Start low and increase gradually.
+</Warning>
+
+### Save Normal Chunks
+
+<ParamField path="saveNormalChunks" type="boolean" default="true">
+  Whether to save LOD chunks to disk when they're converted to normal chunks.
+  
+  When a player approaches a LOD chunk, it's converted to a normal chunk. This setting determines if the data is persisted.
+</ParamField>
+
+**Considerations:**
+- **Enabled**: Chunks remain after server restart, faster loading
+- **Disabled**: Reduces disk usage, chunks regenerate on demand
+
+## Configuration Screen Layout
+
+The ModMenu integration provides a clean, organized interface:
+
+```
+┌─────────────────────────────────────────┐
+│  Voxy World Gen V2 Configuration        │
+├─────────────────────────────────────────┤
+│  General                                │
+│                                         │
+│  ☑ Enabled                              │
+│    Enable or disable the mod            │
+│                                         │
+│  ☑ F3 Stats                             │
+│    Show statistics in F3 menu           │
+│                                         │
+│  Generation Radius: [====●═══] 128     │
+│    Maximum generation distance          │
+│                                         │
+│  Update Interval: [==●═══════] 20      │
+│    Check interval in ticks              │
+│                                         │
+│  Max Queue Size: [20000           ]    │
+│    Maximum queued chunks                │
+│                                         │
+│  Max Active Tasks: [===●══════] 20     │
+│    Concurrent generation tasks          │
+│                                         │
+│  ☑ Save Normal Chunks                   │
+│    Persist LOD chunks to disk           │
+│                                         │
+├─────────────────────────────────────────┤
+│               [Cancel]  [Done]          │
+└─────────────────────────────────────────┘
+```
+
+## Implementation Details
+
+The ModMenu integration is implemented using the ModMenu and Cloth Config APIs:
+
+```java
+public class ModMenuIntegration implements ModMenuApi {
+    @Override
+    public ConfigScreenFactory<?> getModConfigScreenFactory() {
+        return parent -> {
+            ConfigBuilder builder = ConfigBuilder.create()
+                .setParentScreen(parent)
+                .setTitle(Component.translatable("config.voxyworldgenv2.title"));
+            
+            ConfigEntryBuilder entryBuilder = builder.entryBuilder();
+            ConfigCategory general = builder.getOrCreateCategory(
+                Component.translatable("config.voxyworldgenv2.category.general")
+            );
+            
+            // Add settings...
+            
+            builder.setSavingRunnable(() -> {
+                Config.save();
+                ChunkGenerationManager.getInstance().scheduleConfigReload();
+            });
+            
+            return builder.build();
+        };
+    }
+}
+```
+
+### Configuration Entries
+
+Each setting uses Cloth Config's entry builders:
+
+<AccordionGroup>
+  <Accordion title="Boolean Toggle" icon="toggle-on">
+    ```java
+    general.addEntry(
+        entryBuilder.startBooleanToggle(
+            Component.translatable("config.voxyworldgenv2.option.enabled"),
+            Config.DATA.enabled
+        )
+        .setDefaultValue(true)
+        .setTooltip(Component.translatable("config.voxyworldgenv2.option.enabled.tooltip"))
+        .setSaveConsumer(newValue -> Config.DATA.enabled = newValue)
+        .build()
+    );
+    ```
+  </Accordion>
+  
+  <Accordion title="Integer Slider" icon="sliders">
+    ```java
+    general.addEntry(
+        entryBuilder.startIntSlider(
+            Component.translatable("config.voxyworldgenv2.option.radius"),
+            Config.DATA.generationRadius,
+            1,
+            512
+        )
+        .setDefaultValue(128)
+        .setTooltip(Component.translatable("config.voxyworldgenv2.option.radius.tooltip"))
+        .setSaveConsumer(newValue -> Config.DATA.generationRadius = newValue)
+        .build()
+    );
+    ```
+  </Accordion>
+  
+  <Accordion title="Integer Field" icon="input-numeric">
+    ```java
+    general.addEntry(
+        entryBuilder.startIntField(
+            Component.translatable("config.voxyworldgenv2.option.max_queue"),
+            Config.DATA.maxQueueSize
+        )
+        .setDefaultValue(20000)
+        .setTooltip(Component.translatable("config.voxyworldgenv2.option.max_queue.tooltip"))
+        .setSaveConsumer(newValue -> Config.DATA.maxQueueSize = newValue)
+        .build()
+    );
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Save Behavior
+
+When the user clicks **Done**, the configuration is saved and the system reloads:
+
+```java
+builder.setSavingRunnable(() -> {
+    Config.save();  // Write to voxyworldgenv2.json
+    ChunkGenerationManager.getInstance().scheduleConfigReload();  // Apply changes
+});
+```
+
+<Info>
+Configuration changes take effect immediately without requiring a restart.
+</Info>
+
+## Translation Keys
+
+The integration uses translation keys for internationalization:
+
+```json
+{
+  "config.voxyworldgenv2.title": "Voxy World Gen V2 Configuration",
+  "config.voxyworldgenv2.category.general": "General",
+  "config.voxyworldgenv2.option.enabled": "Enabled",
+  "config.voxyworldgenv2.option.enabled.tooltip": "Enable or disable chunk generation",
+  "config.voxyworldgenv2.option.f3_stats": "F3 Stats",
+  "config.voxyworldgenv2.option.f3_stats.tooltip": "Show generation stats in F3 debug screen",
+  "config.voxyworldgenv2.option.radius": "Generation Radius",
+  "config.voxyworldgenv2.option.radius.tooltip": "Maximum distance to generate chunks (in chunks)",
+  "config.voxyworldgenv2.option.update_interval": "Update Interval",
+  "config.voxyworldgenv2.option.update_interval.tooltip": "How often to check for new chunks (in ticks)",
+  "config.voxyworldgenv2.option.max_queue": "Max Queue Size",
+  "config.voxyworldgenv2.option.max_queue.tooltip": "Maximum number of queued chunks",
+  "config.voxyworldgenv2.option.max_active": "Max Active Tasks",
+  "config.voxyworldgenv2.option.max_active.tooltip": "Maximum concurrent generation tasks",
+  "config.voxyworldgenv2.option.save_normal_chunks": "Save Normal Chunks",
+  "config.voxyworldgenv2.option.save_normal_chunks.tooltip": "Save LOD chunks when converted to normal chunks"
+}
+```
+
+## Configuration File
+
+Settings are persisted to `config/voxyworldgenv2.json`:
+
+```json
+{
+  "enabled": true,
+  "showF3MenuStats": true,
+  "generationRadius": 128,
+  "update_interval": 20,
+  "maxQueueSize": 20000,
+  "maxActiveTasks": 20,
+  "saveNormalChunks": true
+}
+```
+
+You can edit this file directly if you prefer, but changes won't take effect until the game is restarted or the configuration is reloaded.
+
+<Note>
+The in-game configuration screen is the recommended way to change settings as it validates input and applies changes immediately.
+</Note>
+
+## Auto-Configuration on First Run
+
+On first launch, the mod automatically configures itself based on your hardware:
+
+```java
+public static void load() {
+    if (!Files.exists(CONFIG_PATH)) {
+        int cores = Runtime.getRuntime().availableProcessors();
+        long maxMemory = Runtime.getRuntime().maxMemory() / (1024 * 1024);
+        
+        // Scale based on hardware
+        DATA.maxActiveTasks = 20;
+        DATA.generationRadius = 128;
+        
+        save();
+        return;
+    }
+    // Load existing config...
+}
+```
+
+This ensures reasonable defaults for your system while allowing easy customization.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Config Button Missing" icon="circle-question">
+    **Symptoms:** No config button appears in ModMenu
+    
+    **Causes:**
+    - ModMenu not installed
+    - Cloth Config not installed
+    - Mod version mismatch
+    
+    **Solutions:**
+    - Install ModMenu from Modrinth/CurseForge
+    - Install Cloth Config API
+    - Ensure all mods are compatible with your Minecraft version
+  </Accordion>
+  
+  <Accordion title="Changes Not Saving" icon="floppy-disk">
+    **Symptoms:** Settings revert after closing the screen
+    
+    **Causes:**
+    - File permission issues
+    - Config directory doesn't exist
+    - Disk full
+    
+    **Solutions:**
+    - Check file permissions on `config/voxyworldgenv2.json`
+    - Verify config directory exists and is writable
+    - Free up disk space
+  </Accordion>
+  
+  <Accordion title="Invalid Values" icon="triangle-exclamation">
+    **Symptoms:** Settings accept invalid values or cause crashes
+    
+    **Causes:**
+    - Direct config file editing with invalid JSON
+    - Corrupted config file
+    
+    **Solutions:**
+    - Delete `config/voxyworldgenv2.json` to regenerate defaults
+    - Use the in-game UI which validates all input
+    - Check logs for JSON parsing errors
+  </Accordion>
+</AccordionGroup>
+
+## Source Code Reference
+
+The ModMenu integration is implemented in:
+
+```
+src/main/java/com/ethan/voxyworldgenv2/integration/ModMenuIntegration.java
+```
+
+Key components:
+- **Lines 11-19**: Config screen factory and builder setup
+- **Lines 22-26**: Enabled toggle
+- **Lines 28-32**: F3 stats toggle
+- **Lines 34-38**: Generation radius slider
+- **Lines 40-44**: Update interval slider
+- **Lines 46-50**: Max queue size field
+- **Lines 52-56**: Max active tasks slider
+- **Lines 58-62**: Save chunks toggle
+- **Lines 64-67**: Save handler
+
+Configuration data structure:
+
+```
+src/main/java/com/ethan/voxyworldgenv2/core/Config.java
+```
+
+- **Lines 14-15**: Config file path and GSON setup
+- **Lines 19-38**: Config loading with auto-configuration
+- **Lines 40-49**: Config saving
+- **Lines 51-59**: ConfigData class with all settings
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Configuration Overview" icon="gear" href="/configuration/overview">
+    Learn about all configuration options in detail
+  </Card>
+  
+  <Card title="Advanced Settings" icon="sliders" href="/configuration/advanced">
+    Fine-tune performance and behavior
+  </Card>
+  
+  <Card title="Performance Tuning" icon="gauge" href="/guides/optimization">
+    Optimize settings for your hardware
+  </Card>
+  
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Solve common configuration issues
+  </Card>
+</CardGroup>

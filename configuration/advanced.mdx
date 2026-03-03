@@ -1,0 +1,443 @@
+---
+title: 'Advanced Configuration'
+description: 'Performance tuning and advanced optimization for Voxy World Gen V2'
+icon: 'gears'
+---
+
+## Hardware-Based Auto-Tuning
+
+Voxy World Gen V2 includes intelligent hardware detection that automatically configures optimal settings on first run.
+
+### Auto-Configuration Process
+
+When no configuration file exists, the mod analyzes your system (Config.java:19-30):
+
+```java Hardware Detection
+int cores = Runtime.getRuntime().availableProcessors();
+long maxMemory = Runtime.getRuntime().maxMemory() / (1024 * 1024); // MB
+
+// Scale based on hardware
+DATA.maxActiveTasks = 20;
+DATA.generationRadius = 128; // standard default
+```
+
+The current implementation sets conservative defaults:
+- **maxActiveTasks:** 20 concurrent tasks (suitable for 4-8 core systems)
+- **generationRadius:** 128 chunks (balanced for most hardware)
+
+<Tip>
+While auto-configuration provides safe defaults, manual tuning based on your specific hardware and use case can significantly improve performance.
+</Tip>
+
+### Understanding CPU Core Utilization
+
+The `maxActiveTasks` setting directly controls CPU utilization:
+
+**Task-to-Core Ratio:**
+- Each active task performs chunk generation work
+- Multiple tasks can share a single core via thread scheduling
+- Optimal ratio depends on workload characteristics
+
+**Recommended formulas:**
+
+<CodeGroup>
+```text Conservative (minimize impact)
+maxActiveTasks = cores * 1.5
+```
+
+```text Balanced (default approach)
+maxActiveTasks = cores * 2.5
+```
+
+```text Aggressive (maximum throughput)
+maxActiveTasks = cores * 4
+```
+</CodeGroup>
+
+**Examples by CPU:**
+
+| CPU Type | Cores | Conservative | Balanced | Aggressive |
+|----------|-------|--------------|----------|------------|
+| i5-12400 | 6 | 9 | 15 | 24 |
+| Ryzen 5 5600X | 6 | 9 | 15 | 24 |
+| i7-13700K | 16 | 24 | 40 | 64 |
+| Ryzen 9 7950X | 16 | 24 | 40 | 64 |
+| Threadripper | 32 | 48 | 80 | 128 |
+
+<Warning>
+Setting `maxActiveTasks` higher than your CPU can handle will cause:
+- Increased context switching overhead
+- Lower overall throughput
+- Game stuttering and lag
+
+Monitor TPS (ticks per second) to ensure you're not overloading the system.
+</Warning>
+
+## Configuration Reload Mechanism
+
+Voxy World Gen V2 supports hot-reloading configuration without restarting Minecraft.
+
+### Reload Trigger
+
+Configuration reloads are scheduled via the `scheduleConfigReload()` method (ChunkGenerationManager.java:566-568):
+
+```java Reload Scheduling
+public void scheduleConfigReload() {
+    configReloadScheduled.set(true);
+}
+```
+
+This is automatically called when saving changes through ModMenu (ModMenuIntegration.java:66).
+
+### Reload Process
+
+On the next game tick, the system executes the reload (ChunkGenerationManager.java:357-361):
+
+1. **Load Configuration:** Reads `voxyworldgenv2.json` and parses updated values
+2. **Update Throttle:** Adjusts the semaphore capacity for `maxActiveTasks`
+3. **Restart Scan:** Recalculates chunk distances and generation priorities
+
+```java Reload Implementation
+if (configReloadScheduled.compareAndSet(true, false)) {
+    Config.load();
+    updateThrottleCapacity();
+    restartScan();
+}
+```
+
+### Throttle Capacity Update
+
+The `updateThrottleCapacity()` method dynamically adjusts concurrent task limits (ChunkGenerationManager.java:490-497):
+
+```java Dynamic Throttle Adjustment
+private void updateThrottleCapacity() {
+    int target = Config.DATA.maxActiveTasks;
+    int available = throttle.availablePermits();
+    int maxPossible = available + activeTaskCount.get();
+    if (target > maxPossible) {
+        throttle.release(target - maxPossible);
+    }
+}
+```
+
+**How it works:**
+- Calculates current permits (available + in-use)
+- If target is higher, releases additional permits
+- If target is lower, naturally drains as tasks complete
+- No tasks are forcibly terminated
+
+<Tip>
+Increasing `maxActiveTasks` takes effect immediately. Decreasing gradually applies as running tasks complete.
+</Tip>
+
+## Disk Usage and saveNormalChunks
+
+The `saveNormalChunks` setting has significant implications for disk space and world persistence.
+
+### Disk Space Impact
+
+**Chunk storage calculations:**
+
+<CodeGroup>
+```text Formula
+total_chunks = (2 * radius + 1)²
+average_size_per_chunk ≈ 5-15 KB (varies by terrain)
+total_disk_space = total_chunks * average_size
+```
+
+```text Example: 128 Radius
+total_chunks = (2 * 128 + 1)² = 65,536 chunks
+average_size = 10 KB
+total_disk_space ≈ 640 MB
+```
+
+```text Example: 256 Radius
+total_chunks = (2 * 256 + 1)² = 262,144 chunks
+average_size = 10 KB
+total_disk_space ≈ 2.5 GB
+```
+
+```text Example: 512 Radius
+total_chunks = (2 * 512 + 1)² = 1,050,625 chunks
+average_size = 10 KB
+total_disk_space ≈ 10 GB
+```
+</CodeGroup>
+
+### Implementation Details
+
+When `saveNormalChunks = false` (ChunkGenerationManager.java:323-328):
+
+```java Unsaved Chunk Handling
+if (!Config.DATA.saveNormalChunks) {
+    LodChunkTracker tracker = LodChunkTracker.getInstance();
+    tracker.markLod(finalState.level.dimension(), pos.toLong());
+    ((ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
+    tracker.incrementSkipped();
+}
+```
+
+**Process:**
+1. Mark chunk as LOD in the tracker (in-memory only)
+2. Set chunk's unsaved flag via mixin (prevents disk write)
+3. Increment skipped counter for statistics
+4. Chunk data remains in memory during session
+5. Lost on world reload
+
+### Trade-offs Analysis
+
+| Setting | Disk Usage | Load Time | Regeneration | Best For |
+|---------|------------|-----------|--------------|----------|
+| `true` | High | Fast | None | Survival, long-term worlds |
+| `false` | Minimal | Fast initial, slow after reload | Full regen each load | Preview, testing, limited disk |
+
+<Warning>
+**Important considerations when disabling `saveNormalChunks`:**
+
+- All LOD chunks regenerate on world reload
+- Regeneration time scales with `generationRadius²`
+- World backup/restore doesn't preserve LOD chunks
+- Server restarts require full regeneration
+- Not recommended for multiplayer servers
+</Warning>
+
+## Performance Tuning Recommendations
+
+### Profiling Your System
+
+Before optimizing, establish baseline performance:
+
+1. **Monitor TPS:** Press F3 and check "TPS" in debug info
+   - Target: 20 TPS (ideal)
+   - Acceptable: 18-20 TPS
+   - Warning: &lt;18 TPS (reduce load)
+
+2. **Watch Generation Stats:** Enable `showF3MenuStats = true`
+   - Active tasks should stay near `maxActiveTasks`
+   - Monitor chunks/second throughput
+   - Check for throttling indicators
+
+3. **CPU Monitoring:** Use system tools
+   - Task Manager (Windows)
+   - Activity Monitor (macOS)
+   - htop/top (Linux)
+
+### Optimization Strategies
+
+#### Strategy 1: Maximize Throughput
+
+**Goal:** Generate chunks as fast as possible, accept temporary performance impact
+
+```json High-Throughput Configuration
+{
+  "enabled": true,
+  "generationRadius": 256,
+  "maxQueueSize": 50000,
+  "maxActiveTasks": 64,
+  "saveNormalChunks": true
+}
+```
+
+**Best for:**
+- Pre-generating worlds while AFK
+- Server setup before players join
+- High-end workstations (16+ cores)
+
+#### Strategy 2: Balanced Background Generation
+
+**Goal:** Generate chunks while playing without impacting gameplay
+
+```json Balanced Configuration
+{
+  "enabled": true,
+  "generationRadius": 128,
+  "maxQueueSize": 20000,
+  "maxActiveTasks": 20,
+  "saveNormalChunks": true
+}
+```
+
+**Best for:**
+- Active gameplay sessions
+- Mid-range systems (8-12 cores)
+- Maintaining 18+ TPS
+
+#### Strategy 3: Minimal Impact
+
+**Goal:** Generate chunks with negligible performance impact
+
+```json Low-Impact Configuration
+{
+  "enabled": true,
+  "generationRadius": 64,
+  "maxQueueSize": 10000,
+  "maxActiveTasks": 8,
+  "saveNormalChunks": false
+}
+```
+
+**Best for:**
+- Low-end systems (4-6 cores)
+- Streaming/recording gameplay
+- Performance-sensitive applications
+
+#### Strategy 4: Temporary Preview World
+
+**Goal:** Quickly explore world generation without disk commitment
+
+```json Preview Configuration
+{
+  "enabled": true,
+  "generationRadius": 192,
+  "maxQueueSize": 30000,
+  "maxActiveTasks": 40,
+  "saveNormalChunks": false
+}
+```
+
+**Best for:**
+- Testing world seeds
+- Screenshot tours
+- Temporary exploration
+- Limited disk space scenarios
+
+### Fine-Tuning Process
+
+1. **Start with defaults:** Let auto-configuration run
+2. **Measure baseline:** Play for 15-30 minutes, note TPS
+3. **Adjust incrementally:** Change one setting at a time
+4. **Test thoroughly:** Play for 15-30 minutes after each change
+5. **Monitor stability:** Ensure TPS stays above 18
+6. **Iterate:** Repeat steps 3-5 until optimal
+
+<Tip>
+**Quick tuning guide:**
+
+- **Low FPS/stuttering:** Reduce `maxActiveTasks` by 25%
+- **Slow generation:** Increase `maxActiveTasks` by 25%
+- **High disk usage:** Set `saveNormalChunks = false`
+- **Running out of memory:** Reduce `maxQueueSize`
+- **Chunks not generating fast enough:** Increase `generationRadius` cautiously
+</Tip>
+
+## Advanced Use Cases
+
+### Server Pre-Generation
+
+For multiplayer servers, pre-generate the world before players join:
+
+1. Configure for maximum throughput:
+   ```json
+   {
+     "maxActiveTasks": 80,
+     "generationRadius": 512,
+     "saveNormalChunks": true
+   }
+   ```
+
+2. Start server with no players
+3. Teleport to key locations to trigger generation
+4. Monitor progress via F3 stats
+5. When complete, reduce to balanced settings:
+   ```json
+   {
+     "maxActiveTasks": 25,
+     "generationRadius": 128,
+     "saveNormalChunks": true
+   }
+   ```
+
+### Memory-Constrained Environments
+
+For systems with limited RAM (8GB or less):
+
+```json Memory-Optimized Configuration
+{
+  "enabled": true,
+  "generationRadius": 64,
+  "maxQueueSize": 5000,
+  "maxActiveTasks": 8,
+  "saveNormalChunks": false
+}
+```
+
+Additional tips:
+- Reduce Minecraft's render distance
+- Close other applications
+- Allocate appropriate JVM memory (4-6GB)
+- Consider using Sodium for better performance
+
+### Testing and Development
+
+For mod developers and world designers:
+
+```json Development Configuration
+{
+  "enabled": true,
+  "showF3MenuStats": true,
+  "generationRadius": 96,
+  "maxQueueSize": 15000,
+  "maxActiveTasks": 30,
+  "saveNormalChunks": false
+}
+```
+
+Benefits:
+- Fast iteration (no disk writes)
+- Visible statistics for debugging
+- Balanced performance for testing
+- Easy world reset (just reload)
+
+## Troubleshooting Performance Issues
+
+### High CPU Usage
+
+**Symptoms:** CPU at 100%, system slow, other applications lag
+
+**Solutions:**
+1. Reduce `maxActiveTasks` by 50%
+2. Increase `update_interval` (if using legacy version)
+3. Lower `generationRadius`
+4. Close background applications
+
+### Low TPS
+
+**Symptoms:** Game runs below 18 TPS, noticeable lag
+
+**Solutions:**
+1. Reduce `maxActiveTasks` to 10-15
+2. Check for throttling (TPS monitor system)
+3. Verify no other performance mods conflict
+4. Consider using performance optimization mods
+
+### Out of Memory Errors
+
+**Symptoms:** Java heap space errors, crashes
+
+**Solutions:**
+1. Reduce `maxQueueSize` to 10000 or lower
+2. Lower `generationRadius`
+3. Set `saveNormalChunks = false` temporarily
+4. Increase JVM heap size (-Xmx flag)
+5. Restart Minecraft periodically
+
+### Disk Space Exhaustion
+
+**Symptoms:** Disk full warnings, slow saves
+
+**Solutions:**
+1. Set `saveNormalChunks = false`
+2. Delete old LOD chunk data
+3. Reduce `generationRadius`
+4. Clean up old world saves
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Configuration Overview" icon="gear" href="/configuration/overview">
+    Learn about the config file and ModMenu integration
+  </Card>
+  <Card title="Configuration Settings" icon="sliders" href="/configuration/settings">
+    Complete reference for all configuration options
+  </Card>
+</CardGroup>

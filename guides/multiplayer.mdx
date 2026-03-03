@@ -1,0 +1,647 @@
+---
+title: Multiplayer Server Setup
+description: Configure Voxy World Gen V2 for dedicated servers and multiplayer environments
+---
+
+## Overview
+
+Voxy World Gen V2 is designed for both singleplayer and multiplayer. In multiplayer mode:
+
+- **Server** generates chunks and ingests them into Voxy
+- **Clients** receive LOD data via custom network packets
+- **Player tracking** manages per-player chunk synchronization
+- **Dimension handling** switches based on player distribution
+
+## Server Installation
+
+<Steps>
+  <Step title="Install required mods">
+    Place these in your server's `mods/` folder:
+    
+    - **Fabric API** (or Quilt Standard Libraries)
+    - **Voxy World Gen V2** (this mod)
+    - **Voxy** (for LOD visualization)
+    
+    <Tip>
+    Download from [Modrinth](https://modrinth.com) or [CurseForge](https://curseforge.com). Ensure versions match your Minecraft version.
+    </Tip>
+  </Step>
+  
+  <Step title="Configure server properties">
+    Edit `server.properties`:
+    
+    ```properties
+    # Increase view distance for better LOD coverage
+    view-distance=12
+    simulation-distance=10
+    ```
+    
+    Higher view distances complement LOD generation.
+  </Step>
+  
+  <Step title="Configure Voxy World Gen">
+    Create/edit `config/voxyworldgenv2.json`:
+    
+    ```json
+    {
+      "enabled": true,
+      "maxActiveTasks": 24,
+      "generationRadius": 128,
+      "saveNormalChunks": true,
+      "showF3MenuStats": true
+    }
+    ```
+    
+    **Server considerations:**
+    - `maxActiveTasks`: Start conservative (20-24), increase based on hardware
+    - `saveNormalChunks: true`: Important for multiplayer so chunks persist for all players
+  </Step>
+  
+  <Step title="Start the server">
+    Launch server and check logs for:
+    
+    ```
+    [voxy worldgen] voxy world gen initialized
+    [voxy worldgen] voxy integration initialized (enabled: true)
+    [voxy worldgen] voxy networking initialized
+    ```
+    
+    ✅ All three messages confirm successful setup
+  </Step>
+</Steps>
+
+## Client Installation
+
+**Every player** must install client-side:
+
+<Steps>
+  <Step title="Install client mods">
+    Place in client `mods/` folder:
+    
+    - **Fabric API** (or Quilt Standard Libraries)
+    - **Voxy World Gen V2**
+    - **Voxy**
+  </Step>
+  
+  <Step title="Join the server">
+    Connect normally. On join, the server sends a handshake packet (see `ServerEventHandler.java:26`).
+  </Step>
+  
+  <Step title="Verify connection">
+    Press F3. Bottom-right should show:
+    
+    ```
+    [voxy worldgen v2] connected
+    rate: 0.0 c/s
+    bandwidth: 0 B/s
+    received: 0 (0 B)
+    voxy: enabled
+    ```
+    
+    **Status meaning:**
+    - **connected**: Handshake successful, ready to receive LOD data
+    - **voxy-server: offline**: Server doesn't have mod or handshake failed
+  </Step>
+</Steps>
+
+## Player Tracking
+
+The mod tracks all connected players to determine generation targets.
+
+### How it works
+
+**Code reference:** `PlayerTracker.java`
+
+1. **Player joins:** Added to tracker via `ServerEventHandler.onPlayerJoin` (line 24-26)
+2. **Player leaves:** Removed via `ServerEventHandler.onPlayerDisconnect` (line 29-31)
+3. **Synced chunks:** Each player has a set of chunk positions they've received (line 13)
+
+**Synchronized chunk tracking:**
+
+```java
+private final Map<UUID, LongSet> syncedChunks;
+```
+
+When a chunk is broadcast, it's marked as synced for receiving players (see `NetworkHandler.java:154-156`). This prevents duplicate sends.
+
+### Generation follows players
+
+Generation is player-centric. The system:
+
+1. Gets all online players (line 173 in `ChunkGenerationManager.java`)
+2. For each player, finds missing chunks in their radius
+3. Generates nearest chunks first (via `DistanceGraph`)
+
+**Code reference:**
+
+```java
+for (ServerPlayer player : players) {
+    DimensionState ds = getOrSetupState((ServerLevel) player.level());
+    int radius = ds.tellusActive ? Math.max(Config.DATA.generationRadius, 128) 
+                                  : Config.DATA.generationRadius;
+    batch = ds.distanceGraph.findWork(player.chunkPosition(), radius, ds.trackedBatches);
+    if (batch != null) {
+        activeState = ds;
+        break;
+    }
+}
+```
+
+See `ChunkGenerationManager.java:183-190`
+
+### Player movement handling
+
+Every tick, the mod checks player positions:
+
+- **Chunk changed:** Triggers rescan for new missing chunks (line 404)
+- **Dimension changed:** Saves old dimension, loads new dimension state (line 396-397)
+- **Significant movement:** (≥2 chunk distance) Rescans to prioritize new area (line 404)
+
+**Code reference:** `ChunkGenerationManager.java:377-437` (`checkPlayerMovement` method)
+
+## Dimension Switching
+
+In multiplayer, players may be in different dimensions (Overworld, Nether, End).
+
+### Dimension priority logic
+
+The mod generates for whichever dimension has the **most players**.
+
+**Code reference:** `ChunkGenerationManager.java:409-423`
+
+```java
+ServerLevel majorLevel = currentLevel;
+int maxCount = levelCounts.getOrDefault(currentLevel, 0);
+
+for (var entry : levelCounts.entrySet()) {
+    if (entry.getValue() > maxCount) {
+        maxCount = entry.getValue();
+        majorLevel = entry.getKey();
+    }
+}
+
+if (majorLevel != currentLevel && majorLevel != null) {
+    setupLevel(majorLevel);
+    return;
+}
+```
+
+**Example scenarios:**
+
+<AccordionGroup>
+  <Accordion title="3 players in Overworld, 1 in Nether">
+    **Result:** Generates Overworld
+    
+    To switch to Nether, at least 2 players must enter Nether (to have more than Overworld).
+  </Accordion>
+
+  <Accordion title="2 players in End, 2 in Overworld">
+    **Result:** Continues current dimension (tie doesn't trigger switch)
+    
+    One player must switch to break the tie.
+  </Accordion>
+
+  <Accordion title="All players leave dimension">
+    **Result:** Saves current dimension state, switches to new majority dimension
+    
+    Progress is saved via `ChunkPersistence.save` (line 451 in `ChunkGenerationManager.java`).
+  </Accordion>
+</AccordionGroup>
+
+### Per-dimension state
+
+Each dimension maintains separate state:
+
+**Code reference:** `ChunkGenerationManager.java:43-57` (`DimensionState` class)
+
+```java
+private static class DimensionState {
+    final ServerLevel level;
+    final LongSet completedChunks = ...;      // Which chunks are done
+    final LongSet trackedChunks = ...;        // Currently generating
+    final DistanceGraph distanceGraph = ...;  // Spatial index
+    final AtomicInteger remainingInRadius;    // Progress tracking
+    boolean tellusActive;                     // Fast generation mode
+    boolean loaded;                           // Persistence loaded
+}
+```
+
+**Persistence:**
+
+- Saved to `world/voxy_gen_minecraft_dimension_*.bin` files
+- Loaded when dimension becomes active (line 463 in `setupLevel`)
+- Allows resuming generation across server restarts
+
+## Chunk Synchronization
+
+Generated chunks are broadcast to nearby clients.
+
+### Broadcast process
+
+<Steps>
+  <Step title="Chunk completes generation">
+    See `ChunkGenerationManager.java:320-330` - after successful generation, calls `NetworkHandler.broadcastLODData(chunk)`
+  </Step>
+  
+  <Step title="Serialize chunk data">
+    `NetworkHandler.java:95-138` serializes:
+    - Block states (per section)
+    - Biomes (per section)
+    - Block light (if available)
+    - Sky light (if available)
+    
+    Skips empty sections to reduce packet size.
+  </Step>
+  
+  <Step title="Send to nearby players">
+    `NetworkHandler.java:143-159` broadcasts to players:
+    - In same dimension
+    - Within 4096 block radius (64 chunks)
+    
+    ```java
+    double maxDistSq = 4096.0 * 4096.0;
+    
+    for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
+        if (player.level() != chunk.getLevel()) continue;
+        
+        double dx = player.getX() - (pos.getMiddleBlockX());
+        double dz = player.getZ() - (pos.getMiddleBlockZ());
+        if (dx * dx + dz * dz <= maxDistSq) {
+            ServerPlayNetworking.send(player, payload);
+            // Mark as synced
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Client receives and ingests">
+    Client-side `NetworkClientHandler` receives packet and ingests into local Voxy instance.
+  </Step>
+</Steps>
+
+### Catch-up synchronization
+
+If a player joins after chunks are generated, they need to catch up.
+
+**Code reference:** `ChunkGenerationManager.java:193-228`
+
+When no new generation work is available, the worker thread:
+
+1. Checks each player's `syncedChunks` set
+2. Finds completed chunks not yet synced to that player
+3. Sends up to 64 chunks per batch
+4. Marks them as synced
+
+```java
+if (batch == null) {
+    // No generation work, try to catch up on syncing
+    for (ServerPlayer player : players) {
+        var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+        if (synced == null) continue;
+        
+        DimensionState ds = getOrSetupState((ServerLevel) player.level());
+        List<ChunkPos> syncBatch = new ArrayList<>();
+        ds.distanceGraph.collectCompletedInRange(player.chunkPosition(), radius, 
+                                                  synced, syncBatch, 64);
+        
+        if (!syncBatch.isEmpty()) {
+            // Send chunks to player
+        }
+    }
+}
+```
+
+**Why this matters:** New players joining a pre-generated world receive LOD data gradually over several seconds without overwhelming the network.
+
+## Network Protocol
+
+The mod uses Fabric Networking API for client-server communication.
+
+### Packets
+
+**1. Handshake (server → client)**
+
+**Code:** `NetworkHandler.java:27-43`
+
+```java
+public record HandshakePayload(boolean serverHasMod) implements CustomPacketPayload {
+    public static final Type<HandshakePayload> TYPE = new Type<>(HANDSHAKE_ID);
+    // ...
+}
+```
+
+Sent when player joins (see `NetworkHandler.java:214-216`):
+
+```java
+public static void sendHandshake(ServerPlayer player) {
+    ServerPlayNetworking.send(player, new HandshakePayload(true));
+}
+```
+
+Client sets `NetworkState.isServerConnected()` to true.
+
+**2. LOD Data (server → client)**
+
+**Code:** `NetworkHandler.java:45-84`
+
+```java
+public record LODDataPayload(ChunkPos pos, int minY, List<SectionData> sections) 
+    implements CustomPacketPayload {
+    public record SectionData(int y, byte[] states, byte[] biomes, 
+                               byte[] blockLight, byte[] skyLight) { }
+}
+```
+
+Contains full chunk data for LOD ingestion.
+
+**Packet size:** Varies by chunk complexity:
+- Empty chunk: Not sent (skipped)
+- Simple chunk (stone): ~500 bytes
+- Complex chunk (structures): 2-5 KB
+
+### Registration
+
+**Code:** `NetworkHandler.java:86-93`
+
+```java
+public static void init() {
+    PayloadTypeRegistry.playC2S().register(HandshakePayload.TYPE, HandshakePayload.CODEC);
+    PayloadTypeRegistry.playS2C().register(HandshakePayload.TYPE, HandshakePayload.CODEC);
+    
+    PayloadTypeRegistry.playS2C().register(LODDataPayload.TYPE, LODDataPayload.CODEC);
+    
+    VoxyWorldGenV2.LOGGER.info("voxy networking initialized");
+}
+```
+
+Called during mod initialization.
+
+## Server Performance Considerations
+
+### CPU allocation
+
+Multiplayer servers share CPU between:
+
+- Player tick processing
+- Entity updates
+- Chunk generation (this mod)
+- Network I/O
+
+**Recommendation:** Reserve 25-50% CPU headroom for players.
+
+**Example calculation:**
+
+- Server has 16 cores
+- Players use ~6 cores at full load
+- Allocate 8-10 cores to generation
+- `maxActiveTasks`: 24-32 (roughly 3 tasks per core)
+
+### Memory pressure
+
+With `saveNormalChunks: true`, disk offloads memory. But consider:
+
+- **Active chunks:** `maxActiveTasks × ~50KB` = 1-2 MB
+- **Player chunks:** `playerCount × viewDistance² × 200KB` = dominant factor
+
+**Example:**
+
+- 10 players
+- View distance 12 (144 chunks per player)
+- 10 × 144 × 200KB ≈ 280 MB just for player chunks
+
+Generation overhead is negligible compared to player load.
+
+### Network bandwidth
+
+Each chunk sent is ~1-3 KB. At 25 c/s generation with 5 players receiving:
+
+- 25 chunks/sec × 5 players = 125 packets/sec
+- 125 × 2 KB = 250 KB/s outbound
+
+On gigabit connection (125 MB/s), this is 0.2% usage - negligible.
+
+**Bottleneck scenarios:**
+
+- 100+ Mbps outbound sustained (25+ players actively receiving)
+- Generation rate > 100 c/s (requires very high `maxActiveTasks`)
+
+**Mitigation:** Reduce `maxActiveTasks` to slow generation and thus broadcast rate.
+
+## Multi-Dimensional Generation Strategy
+
+For servers with players in multiple dimensions:
+
+### Pre-generation approach
+
+<Steps>
+  <Step title="Generate Overworld offline">
+    Before opening to players:
+    
+    1. Start server with no whitelist (or fake player)
+    2. Stand at world spawn
+    3. Wait for generation to complete (remaining: 0)
+    4. Stop server
+  </Step>
+  
+  <Step title="Generate Nether offline">
+    1. Restart server
+    2. `/execute in minecraft:the_nether run tp @s 0 64 0`
+    3. Wait for Nether generation
+    4. Stop server
+  </Step>
+  
+  <Step title="Generate End offline">
+    Same process for `minecraft:the_end`
+  </Step>
+  
+  <Step title="Open to players">
+    All dimensions pre-generated. Players receive only sync packets (fast).
+  </Step>
+</Steps>
+
+### Live generation approach
+
+If players spread across dimensions during gameplay:
+
+1. **Accept switching:** Generation follows majority
+2. **Coordinate player distribution:** Ask players to stay together initially
+3. **Use multiple phases:** "Everyone explore Overworld first, then Nether"
+
+**Why pre-generation is better:** Avoids network spam from 50+ chunks/sec broadcasting to all players.
+
+## Example Server Configurations
+
+### Small community server (5-10 players)
+
+**Hardware:** 8 cores, 16GB RAM, SSD
+
+**Config:**
+
+```json
+{
+  "enabled": true,
+  "maxActiveTasks": 20,
+  "generationRadius": 128,
+  "saveNormalChunks": true,
+  "showF3MenuStats": true
+}
+```
+
+**Why:**
+- Conservative task count leaves headroom for players
+- Standard radius provides good LOD coverage
+- Saves enabled for persistence across restarts
+
+**Expected performance:**
+- 20-30 c/s generation
+- ~40-60 KB/s per player bandwidth
+- TPS: 19.5-20 (minimal impact)
+
+### Large public server (50+ players)
+
+**Hardware:** 32 cores, 64GB RAM, NVMe RAID
+
+**Config:**
+
+```json
+{
+  "enabled": true,
+  "maxActiveTasks": 48,
+  "generationRadius": 256,
+  "saveNormalChunks": true,
+  "showF3MenuStats": true
+}
+```
+
+**Why:**
+- High task count leverages many cores
+- Large radius for distant exploration
+- Saves enabled (disk is fast NVMe)
+
+**Expected performance:**
+- 60-100 c/s generation
+- Bandwidth scales with active players in range
+- TPS: 19-20 (with proper tuning)
+
+**Strategy:**
+
+<Warning>
+Pre-generate all dimensions before public launch. Live generation with 50+ players causes network congestion.
+</Warning>
+
+### Tellus-enabled modpack server
+
+**Hardware:** 16 cores, 32GB RAM, SSD
+
+**Config:**
+
+```json
+{
+  "enabled": true,
+  "maxActiveTasks": 60,
+  "generationRadius": 256,
+  "saveNormalChunks": false,
+  "showF3MenuStats": true
+}
+```
+
+**Why:**
+- Tellus fast generation supports high concurrency
+- Large radius for terrain LODs
+- No saves (Tellus regenerates efficiently)
+
+**Expected performance:**
+- 80-150 c/s (Tellus is 2-3× faster)
+- Lower disk I/O (no saves)
+- TPS: 19-20
+
+## Monitoring Server Health
+
+### Server-side metrics
+
+Check server logs every 5 minutes during initial generation:
+
+```
+[Server thread/INFO]: Time elapsed: X ms (TPS: XX.X)
+```
+
+TPS should stay above 19. If consistently below 18, reduce `maxActiveTasks`.
+
+### Player-side metrics
+
+Ask a trusted player to monitor F3 stats:
+
+```
+[voxy worldgen v2] connected
+rate: 22.4 c/s          ← Healthy if > 10 c/s
+bandwidth: 380 KB/s     ← Healthy if < 1 MB/s per player
+```
+
+### Automated monitoring
+
+For production servers, log metrics:
+
+```java
+// Example: Every 60 seconds
+ChunkGenerationManager mgr = ChunkGenerationManager.getInstance();
+LOGGER.info("Gen stats - Active: {}, Rate: {}, Remaining: {}, Throttled: {}",
+    mgr.getActiveTaskCount(),
+    mgr.getStats().getChunksPerSecond(),
+    mgr.getRemainingInRadius(),
+    mgr.isThrottled()
+);
+```
+
+Integrate with monitoring tools (Grafana, Prometheus) via custom plugin.
+
+## Troubleshooting Multiplayer Issues
+
+### Players not receiving chunks
+
+**Symptoms:**
+- Server F3 shows generation
+- Client F3 shows "voxy-server: offline"
+
+**Fixes:**
+
+1. **Client doesn't have mod:** Install Voxy World Gen V2 on client
+2. **Firewall blocks packets:** Check server firewall rules
+3. **Version mismatch:** Ensure exact same mod version on client and server
+
+### Dimension not generating
+
+**Symptoms:**
+- Players in Nether
+- F3 shows "remaining: 0"
+- No generation happening
+
+**Cause:** More players in Overworld (mod generates there instead)
+
+**Fix:** Have all players enter Nether to shift majority
+
+### High latency/lag
+
+**Symptoms:**
+- TPS: 20
+- Players report lag
+- High network usage
+
+**Cause:** Broadcast spam from rapid generation
+
+**Fixes:**
+
+1. Reduce `maxActiveTasks` to slow generation
+2. Pre-generate world offline
+3. Temporarily disable mod (`enabled: false`) during peak hours
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Optimization" icon="gauge" href="/guides/optimization">
+    Tune server performance settings
+  </Card>
+  
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Debug common multiplayer issues
+  </Card>
+</CardGroup>

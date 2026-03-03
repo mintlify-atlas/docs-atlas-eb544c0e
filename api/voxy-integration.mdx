@@ -1,0 +1,232 @@
+---
+title: VoxyIntegration API
+description: Reflection-based integration with the Voxy mod for LOD chunk ingestion
+---
+
+## Overview
+
+The `VoxyIntegration` class provides a reflection-based API to integrate with the Voxy mod for Level-of-Detail (LOD) chunk rendering. It dynamically detects and invokes Voxy's `VoxelIngestService` methods without requiring compile-time dependencies.
+
+This integration uses Java's `MethodHandle` API for high-performance reflection and supports both high-level chunk ingestion and low-level section-based ingestion with custom lighting data.
+
+**Package:** `com.ethan.voxyworldgenv2.integration`
+
+## Reflection-Based Approach
+
+The integration uses reflection to:
+1. Detect if Voxy is present at runtime (`me.cortex.voxy.common.world.service.VoxelIngestService`)
+2. Resolve method handles for `ingestChunk`, `tryAutoIngestChunk`, `enqueueIngest`, or `ingest` methods
+3. Resolve `rawIngest` method for low-level section ingestion
+4. Bind instance methods to the `INSTANCE` singleton if available
+
+This approach allows seamless integration without hard dependencies, gracefully degrading when Voxy is not installed.
+
+## Methods
+
+### ingestChunk
+
+Ingests a full chunk into Voxy's LOD system using the high-level ingestion method.
+
+```java
+public static void ingestChunk(LevelChunk chunk)
+```
+
+<ParamField path="chunk" type="LevelChunk" required>
+  The Minecraft chunk to ingest into Voxy's LOD system
+</ParamField>
+
+**Behavior:**
+- Automatically initializes the integration on first call
+- Returns silently if Voxy is not available or integration failed
+- Uses the first available method from: `ingestChunk`, `tryAutoIngestChunk`, `enqueueIngest`, or `ingest`
+- Logs errors if invocation fails
+
+**Example:**
+```java
+import com.ethan.voxyworldgenv2.integration.VoxyIntegration;
+import net.minecraft.world.level.chunk.LevelChunk;
+
+// After generating or modifying a chunk
+LevelChunk chunk = level.getChunk(chunkPos.x, chunkPos.z);
+VoxyIntegration.ingestChunk(chunk);
+```
+
+---
+
+### rawIngest (Chunk-based)
+
+Ingests a chunk into Voxy's LOD system with custom sky lighting data, processing all non-empty sections.
+
+```java
+public static void rawIngest(LevelChunk chunk, DataLayer skyLight)
+```
+
+<ParamField path="chunk" type="LevelChunk" required>
+  The chunk containing sections to ingest
+</ParamField>
+
+<ParamField path="skyLight" type="DataLayer">
+  Custom sky light data to use for all sections (block light will be null)
+</ParamField>
+
+**Behavior:**
+- Iterates through all chunk sections
+- Skips null or air-only sections
+- Calls the low-level `rawIngest` method for each section
+- Resolves the `WorldIdentifier` once per chunk for efficiency
+- Returns silently if `rawIngest` method handle is unavailable
+
+**Example:**
+```java
+import net.minecraft.world.level.chunk.DataLayer;
+
+// Ingest with custom sky lighting for procedurally generated terrain
+DataLayer customSkyLight = new DataLayer();
+// ... configure sky light values
+VoxyIntegration.rawIngest(chunk, customSkyLight);
+```
+
+---
+
+### rawIngest (Section-based)
+
+Ingests a single chunk section with full control over lighting data.
+
+```java
+public static void rawIngest(
+    Level level,
+    LevelChunkSection section,
+    int cx,
+    int cy,
+    int cz,
+    DataLayer blockLight,
+    DataLayer skyLight
+)
+```
+
+<ParamField path="level" type="Level" required>
+  The world/level containing the section
+</ParamField>
+
+<ParamField path="section" type="LevelChunkSection" required>
+  The 16×16×16 chunk section to ingest
+</ParamField>
+
+<ParamField path="cx" type="int" required>
+  Chunk X coordinate
+</ParamField>
+
+<ParamField path="cy" type="int" required>
+  Chunk section Y coordinate (vertical section index)
+</ParamField>
+
+<ParamField path="cz" type="int" required>
+  Chunk Z coordinate
+</ParamField>
+
+<ParamField path="blockLight" type="DataLayer">
+  Block light data (e.g., from torches, lava). Pass `null` to use default lighting
+</ParamField>
+
+<ParamField path="skyLight" type="DataLayer">
+  Sky light data (e.g., from sunlight). Pass `null` to use default lighting
+</ParamField>
+
+**Behavior:**
+- Resolves the `WorldIdentifier` from the level
+- Invokes Voxy's low-level `rawIngest` method with exact parameters
+- Returns silently if method handles are unavailable
+- Logs errors on invocation failure
+
+**Example:**
+```java
+// Ingest a single section with custom lighting
+LevelChunkSection section = chunk.getSection(chunk.getSectionIndex(64));
+DataLayer blockLight = null; // use default
+DataLayer skyLight = new DataLayer();
+// ... configure lighting
+
+VoxyIntegration.rawIngest(
+    level,
+    section,
+    chunkPos.x,
+    4, // section Y coordinate
+    chunkPos.z,
+    blockLight,
+    skyLight
+);
+```
+
+**Overload:**
+```java
+public static void rawIngest(
+    Level level,
+    LevelChunkSection section,
+    int cx, int cy, int cz,
+    DataLayer skyLight
+)
+```
+Convenience method that calls the full `rawIngest` with `blockLight = null`.
+
+---
+
+### isVoxyAvailable
+
+Checks if Voxy is available and the integration was successfully initialized.
+
+```java
+public static boolean isVoxyAvailable()
+```
+
+<ResponseField name="return" type="boolean">
+  `true` if Voxy is present and at least the basic `ingestChunk` method was resolved, `false` otherwise
+</ResponseField>
+
+**Behavior:**
+- Triggers initialization on first call
+- Returns `true` only if the high-level ingest method handle was successfully created
+- Does not guarantee that `rawIngest` is available (use cautiously if relying on raw ingestion)
+
+**Example:**
+```java
+if (VoxyIntegration.isVoxyAvailable()) {
+    VoxyWorldGenV2.LOGGER.info("Voxy detected, enabling LOD generation");
+    // ... enable LOD-specific features
+} else {
+    VoxyWorldGenV2.LOGGER.info("Voxy not available, LOD disabled");
+}
+```
+
+## Implementation Details
+
+### Initialization Process
+
+The integration initializes lazily on the first API call:
+
+1. **Class Detection:** Attempts to load `me.cortex.voxy.common.world.service.VoxelIngestService`
+2. **Instance Resolution:** Looks for a static `INSTANCE` field
+3. **Method Resolution:** Searches for ingest methods in priority order:
+   - `ingestChunk(LevelChunk)`
+   - `tryAutoIngestChunk(LevelChunk)`
+   - `enqueueIngest(LevelChunk)`
+   - `ingest(LevelChunk)`
+4. **Raw Ingest Resolution:** Attempts to resolve `rawIngest(WorldIdentifier, LevelChunkSection, int, int, int, DataLayer, DataLayer)`
+5. **WorldIdentifier Resolution:** Resolves `WorldIdentifier.of(Level)` for world identification
+
+### Thread Safety
+
+The integration is thread-safe after initialization:
+- Initialization is guarded by an `initialized` flag
+- `MethodHandle` instances are immutable after creation
+- Multiple threads can safely call API methods concurrently
+
+### Error Handling
+
+All methods fail gracefully:
+- Missing Voxy classes log an info message and disable integration
+- Method invocation errors are logged at ERROR level
+- No exceptions propagate to calling code
+
+## Source Reference
+
+See `VoxyIntegration.java:12-142` for the complete implementation.

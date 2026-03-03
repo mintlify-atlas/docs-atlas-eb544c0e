@@ -1,0 +1,577 @@
+---
+title: Troubleshooting
+description: Solve common issues with Voxy World Gen V2
+---
+
+## Quick Diagnostics
+
+Before diving into specific issues, run these basic checks:
+
+<Steps>
+  <Step title="Verify mod is loaded">
+    Check server logs on startup for:
+    ```
+    [voxy worldgen] voxy world gen initialized
+    ```
+  </Step>
+  
+  <Step title="Check F3 debug stats">
+    Press F3 in-game. You should see stats in bottom-right corner:
+    ```
+    [voxy worldgen v2] running
+    ```
+    
+    If nothing appears, set `showF3MenuStats: true` in config.
+  </Step>
+  
+  <Step title="Verify config file exists">
+    Look for `config/voxyworldgenv2.json` in your Minecraft directory.
+    
+    If missing, the mod will auto-create it on first run.
+  </Step>
+</Steps>
+
+## Common Issues
+
+### Chunks Not Generating
+
+<AccordionGroup>
+  <Accordion title="Generation is disabled in config">
+    **Symptom:** F3 stats show no activity, remaining count is 0
+    
+    **Cause:** `enabled: false` in config
+    
+    **Fix:**
+    
+    1. Open `config/voxyworldgenv2.json`
+    2. Set `"enabled": true`
+    3. Save the file - config reloads automatically
+    
+    **Verification:** F3 stats should update within 5 seconds showing generation activity.
+  </Accordion>
+
+  <Accordion title="No players are online">
+    **Symptom:** Server running but F3 shows "remaining: 0"
+    
+    **Cause:** Generation is player-centric. Worker thread sleeps when no players are online (see `ChunkGenerationManager.java:174-176`).
+    
+    **Fix:** Join the server. Generation starts automatically based on your position.
+    
+    **Code behavior:**
+    ```java
+    if (players.isEmpty()) {
+        Thread.sleep(1000);
+        continue;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="TPS throttling is active">
+    **Symptom:** F3 shows "throttled (low tps)" in red
+    
+    **Cause:** Server TPS dropped below 18, automatic protection engaged (see `TpsMonitor.java:40-44`).
+    
+    **Fix:**
+    
+    <Steps>
+      <Step title="Identify cause of low TPS">
+        - Too many players?
+        - Other mods causing lag?
+        - `maxActiveTasks` too high?
+      </Step>
+      
+      <Step title="Reduce generation load">
+        Edit `config/voxyworldgenv2.json`:
+        ```json
+        {
+          "maxActiveTasks": 12  // Reduce by 50%
+        }
+        ```
+      </Step>
+      
+      <Step title="Wait for TPS recovery">
+        Throttling automatically disables when MSPT drops below 55.5ms. Check F3 stats - should change to "running" in green.
+      </Step>
+    </Steps>
+    
+    **Prevention:** See [Optimization Guide](/guides/optimization) for proper task tuning.
+  </Accordion>
+
+  <Accordion title="Already generated (skipped chunks)">
+    **Symptom:** F3 shows high "skipped" count, low "completed" count
+    
+    **Cause:** Chunks were previously generated and saved. The mod tracks completion in `voxy_gen_*.bin` files (see `ChunkPersistence.java:21`).
+    
+    **Fix:** This is normal behavior! Skipped chunks are already available - no action needed.
+    
+    **To force regeneration:**
+    
+    <Warning>
+    This deletes generation progress. Only do this if chunks are corrupted.
+    </Warning>
+    
+    1. Stop the server
+    2. Delete `world/voxy_gen_minecraft_dimension_*.bin` files
+    3. Restart server
+    
+    Chunks will be treated as "new" and regenerated.
+  </Accordion>
+
+  <Accordion title="Player is in different dimension">
+    **Symptom:** Generation works in Overworld but not Nether/End
+    
+    **Cause:** The mod switches dimensions based on where **most** players are (see `ChunkGenerationManager.java:409-423`).
+    
+    **Fix:**
+    
+    - **Single player:** Generation follows you automatically
+    - **Multiplayer:** Majority of players must be in the dimension you want generated
+    
+    **Example:** 3 players in Overworld, 1 in Nether → generates Overworld. To generate Nether, all 4 players must enter Nether.
+    
+    **Code reference:**
+    ```java
+    // Switches to dimension with most players
+    if (entry.getValue() > maxCount) {
+        maxCount = entry.getValue();
+        majorLevel = entry.getKey();
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Performance Issues
+
+<AccordionGroup>
+  <Accordion title="Server TPS drops when generation is active">
+    **Symptom:** Lag, F3 shows < 18 TPS
+    
+    **Cause:** `maxActiveTasks` exceeds server capacity
+    
+    **Immediate fix:**
+    
+    Edit `config/voxyworldgenv2.json`:
+    ```json
+    {
+      "maxActiveTasks": 8  // Start low
+    }
+    ```
+    
+    Save and wait 10 seconds. TPS should recover.
+    
+    **Long-term fix:**
+    
+    1. Start with `maxActiveTasks: 8`
+    2. Increase by 4 every 5 minutes
+    3. Stop increasing when TPS drops below 19
+    4. Use that value - 4 as your optimal setting
+    
+    **See also:** [Optimization Guide](/guides/optimization)
+  </Accordion>
+
+  <Accordion title="Generation is very slow (< 5 c/s)">
+    **Symptom:** F3 shows low "rate", long ETA
+    
+    **Causes and fixes:**
+    
+    1. **Low maxActiveTasks**
+       - Current value too conservative
+       - **Fix:** Increase by 50% and monitor TPS
+    
+    2. **Disk bottleneck (HDD)**
+       - Saves are slow on spinning disks
+       - **Fix:** Set `"saveNormalChunks": false` or upgrade to SSD
+    
+    3. **CPU bottleneck**
+       - Other processes using CPU
+       - **Fix:** Close unnecessary programs, allocate more cores to Minecraft
+    
+    4. **Auto-throttling**
+       - Check if F3 shows "throttled"
+       - **Fix:** See "TPS throttling is active" above
+    
+    **Benchmark:** Most servers should achieve 15-40 c/s. See [Optimization Guide](/guides/optimization).
+  </Accordion>
+
+  <Accordion title="High memory usage">
+    **Symptom:** Java heap usage grows unbounded, OutOfMemoryError
+    
+    **Causes:**
+    
+    1. **generationRadius too large**
+       - Radius 256 = 204,800 chunks to track
+       - **Fix:** Reduce to 128 or 64
+    
+    2. **saveNormalChunks disabled with high radius**
+       - Chunks stay in memory instead of saving to disk
+       - **Fix:** Enable `"saveNormalChunks": true`
+    
+    3. **Insufficient heap allocation**
+       - Minecraft needs more RAM
+       - **Fix:** Increase `-Xmx` JVM argument (e.g., `-Xmx8G` for 8GB)
+    
+    **Memory-efficient config:**
+    ```json
+    {
+      "generationRadius": 64,
+      "saveNormalChunks": true,
+      "maxActiveTasks": 16
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Voxy Integration Not Working
+
+<AccordionGroup>
+  <Accordion title="Voxy mod not installed">
+    **Symptom:** F3 shows "voxy: disabled" in red
+    
+    **Cause:** Voxy mod is not present in `mods/` folder
+    
+    **Fix:**
+    
+    <Steps>
+      <Step title="Download Voxy">
+        Get the latest version from [Modrinth](https://modrinth.com/mod/voxy) or CurseForge
+      </Step>
+      
+      <Step title="Install to mods folder">
+        Place `voxy-*.jar` in your `mods/` directory
+      </Step>
+      
+      <Step title="Restart Minecraft">
+        Full restart required (not just reload)
+      </Step>
+      
+      <Step title="Verify integration">
+        Check logs for:
+        ```
+        [voxy worldgen] voxy integration initialized (enabled: true)
+        ```
+        
+        F3 should now show "voxy: enabled" in green
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Voxy installed but not detected">
+    **Symptom:** Voxy mod is in mods folder, but F3 shows "disabled"
+    
+    **Cause:** Version incompatibility or initialization failure
+    
+    **Fix:**
+    
+    1. Check server logs for errors:
+       ```
+       [voxy worldgen] failed to initialize voxy integration
+       ```
+    
+    2. **Version mismatch:**
+       - Ensure Voxy version matches your Minecraft version
+       - Example: Minecraft 1.21.4 needs Voxy 1.21.4
+    
+    3. **API changes:**
+       - Voxy may have changed internal APIs
+       - Update both mods to latest versions
+    
+    4. **Reflection failure:**
+       - Check if Java security manager blocks reflection
+       - Ensure no `-Djava.security.manager` JVM arg
+  </Accordion>
+
+  <Accordion title="Chunks generate but don't appear in LOD view">
+    **Symptom:** F3 shows chunks completing, but distant terrain not visible
+    
+    **Causes:**
+    
+    1. **Ingestion failed silently**
+       - Check logs for:
+         ```
+         [voxy worldgen] failed to ingest chunk
+         ```
+       - Usually means Voxy internal error
+    
+    2. **Voxy not rendering LODs**
+       - This is a Voxy issue, not Voxy World Gen
+       - Check Voxy's own debug screen
+       - Verify LOD storage in `voxy_data/` folder
+    
+    3. **Client-side only mod**
+       - On multiplayer, client must have Voxy installed
+       - Server generates, client renders
+    
+    **Debugging:**
+    
+    - Enable verbose logging in Voxy's config
+    - Check `logs/latest.log` for ingestion calls
+    - Verify `VoxyIntegration.java:88-92` is executing without exceptions
+  </Accordion>
+</AccordionGroup>
+
+### Configuration Issues
+
+<AccordionGroup>
+  <Accordion title="Config file not saving">
+    **Symptom:** Edit config, but changes revert on restart
+    
+    **Causes:**
+    
+    1. **File permissions**
+       - Config directory is read-only
+       - **Fix (Linux/Mac):**
+         ```bash
+         chmod 755 config
+         chmod 644 config/voxyworldgenv2.json
+         ```
+       - **Fix (Windows):** Right-click folder → Properties → Uncheck "Read-only"
+    
+    2. **Invalid JSON syntax**
+       - Parsing fails, defaults loaded instead
+       - **Fix:** Validate JSON at [jsonlint.com](https://jsonlint.com)
+       - Check logs for:
+         ```
+         [voxy worldgen] failed to save config
+         ```
+    
+    3. **File locked by another process**
+       - Editor or backup software has file open
+       - **Fix:** Close all editors, wait 10 seconds, try again
+  </Accordion>
+
+  <Accordion title="Config changes not applying">
+    **Symptom:** Edit config, save, but behavior doesn't change
+    
+    **Causes:**
+    
+    1. **Edited wrong file**
+       - Multiple Minecraft instances (client/server)
+       - **Fix:** Confirm path:
+         - Server: `server_folder/config/voxyworldgenv2.json`
+         - Client: `%appdata%/.minecraft/config/voxyworldgenv2.json` (Windows)
+    
+    2. **Requires restart**
+       - Most settings hot-reload, but verify in logs:
+         ```
+         [voxy worldgen] Config reloaded
+         ```
+       - If not seen, restart server
+    
+    3. **Typo in parameter name**
+       - Example: `maxActiveTask` instead of `maxActiveTasks`
+       - **Fix:** Compare against default config:
+         ```json
+         {
+           "enabled": true,
+           "showF3MenuStats": true,
+           "generationRadius": 128,
+           "maxActiveTasks": 20,
+           "saveNormalChunks": true
+         }
+         ```
+  </Accordion>
+
+  <Accordion title="F3 stats not showing">
+    **Symptom:** Press F3, no Voxy stats in corner
+    
+    **Fixes:**
+    
+    1. **Enable in config:**
+       ```json
+       {
+         "showF3MenuStats": true
+       }
+       ```
+    
+    2. **Check you're pressing F3 correctly:**
+       - Opens Minecraft debug screen
+       - Stats appear in bottom-right (not top-left)
+    
+    3. **Verify client-side mod installed:**
+       - F3 stats render client-side
+       - Multiplayer: client needs Voxy World Gen V2 installed
+    
+    4. **GUI scale too large:**
+       - Stats render off-screen
+       - Reduce GUI scale in Video Settings
+  </Accordion>
+</AccordionGroup>
+
+### Multiplayer Specific Issues
+
+<AccordionGroup>
+  <Accordion title="Clients not receiving LOD data">
+    **Symptom:** Server generates chunks, but clients don't see them
+    
+    **Cause:** Client doesn't have the mod or network desync
+    
+    **Fix:**
+    
+    <Steps>
+      <Step title="Install client-side">
+        Every player must have Voxy World Gen V2 in their `mods/` folder
+      </Step>
+      
+      <Step title="Verify handshake">
+        Check client logs for:
+        ```
+        [voxy worldgen] Received server handshake
+        ```
+      </Step>
+      
+      <Step title="Check network stats">
+        F3 should show (on client):
+        ```
+        [voxy worldgen v2] connected
+        rate: 15.2 c/s
+        bandwidth: 450 KB/s
+        ```
+      </Step>
+    </Steps>
+    
+    **If still failing:** Check `NetworkHandler.java:214` - server sends handshake on join. Firewall or network issue may block packets.
+  </Accordion>
+
+  <Accordion title="High bandwidth usage">
+    **Symptom:** Network saturated, lag
+    
+    **Cause:** LOD data packets are chunk-sized (several KB each)
+    
+    **Mitigation:**
+    
+    1. **Reduce generation speed:**
+       - Lower `maxActiveTasks` to reduce broadcast rate
+    
+    2. **Limit player spread:**
+       - Players far apart trigger more unique generation
+       - Keep players in same area initially
+    
+    3. **Pre-generate offline:**
+       - Generate world before players join
+       - Only sync already-generated chunks (fast)
+    
+    **Code reference:** `NetworkHandler.java:143-159` broadcasts to all players within 4096 block radius.
+  </Accordion>
+</AccordionGroup>
+
+## Interpreting F3 Debug Stats
+
+The F3 overlay provides real-time diagnostics. Here's what each field means:
+
+### Singleplayer Stats
+
+```
+[voxy worldgen v2] running          ← Status: running / throttled / done
+completed: 45.2K                    ← Chunks generated this session
+skipped: 1.3K                       ← Chunks loaded from disk (already existed)
+lod suppressed: 890                 ← Chunks not saved (saveNormalChunks: false)
+remaining: 5847 (3m 12s)            ← Chunks left in radius + ETA
+active: 24                          ← Current concurrent tasks
+rate: 25.3 c/s                      ← Chunks per second (10s average)
+voxy: enabled                       ← Voxy integration status
+```
+
+**Code reference:** `DebugRenderer.java:62-74`
+
+### Multiplayer Stats (Client View)
+
+```
+[voxy worldgen v2] connected        ← Server has mod and is sending data
+rate: 18.7 c/s                      ← Chunks received per second
+bandwidth: 425 KB/s                 ← Network throughput
+received: 12.4K (145 MB)            ← Total chunks + data received
+voxy: enabled                       ← Local Voxy integration
+```
+
+**Code reference:** `DebugRenderer.java:76-83`
+
+### Status Indicators
+
+- **running (green):** Normal operation
+- **throttled (red):** TPS protection active, generation paused
+- **done (green):** All chunks in radius completed
+- **connected (green):** Client receiving server data
+- **voxy-server: offline (red):** Server doesn't have mod or hasn't sent handshake
+
+## Log Analysis
+
+Key log messages and what they mean:
+
+### Startup Logs
+
+```
+[voxy worldgen] voxy world gen initialized
+```
+✅ Mod loaded successfully
+
+```
+[voxy worldgen] voxy integration initialized (enabled: true)
+```
+✅ Voxy detected and integrated
+
+```
+[voxy worldgen] voxy not present, integration disabled
+```
+⚠️ Voxy not found (expected if you don't have Voxy)
+
+### Runtime Logs
+
+```
+[voxy worldgen] tellus world detected for minecraft:overworld, enabling fast generation
+```
+✅ Tellus integration active for this dimension
+
+```
+[voxy worldgen] loaded 45234 chunks from voxy generation cache for ResourceKey[minecraft:dimension/overworld]
+```
+✅ Restored previous generation progress
+
+```
+[voxy worldgen] error in worker loop
+```
+❌ Generation error - check full stack trace
+
+### Shutdown Logs
+
+```
+[voxy worldgen] server stopping, shutting down manager
+```
+✅ Clean shutdown initiated
+
+## Getting Help
+
+If you've tried the above and still have issues:
+
+<Steps>
+  <Step title="Gather diagnostics">
+    - Full `latest.log` file
+    - Screenshot of F3 stats
+    - Config file contents
+    - Mod list (if multiplayer, both client and server)
+  </Step>
+  
+  <Step title="Check existing issues">
+    Search the [GitHub Issues](https://github.com/ethan4984/voxy-world-gen-v2/issues) for similar problems
+  </Step>
+  
+  <Step title="Report bug">
+    If not found, open a new issue with:
+    - Minecraft version
+    - Mod version
+    - Detailed description of problem
+    - Steps to reproduce
+    - Diagnostic info from step 1
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Optimization" icon="gauge" href="/guides/optimization">
+    Tune performance for your hardware
+  </Card>
+  
+  <Card title="Multiplayer Setup" icon="users" href="/guides/multiplayer">
+    Configure for dedicated servers
+  </Card>
+</CardGroup>

@@ -1,0 +1,281 @@
+---
+title: Mixin System
+description: Internal mixin modifications to Minecraft's chunk and server systems
+---
+
+<Warning>
+Mixins are internal implementation details that modify Minecraft's core behavior. These are typically only relevant for developers working on Voxy World Gen itself or debugging integration issues.
+</Warning>
+
+## Overview
+
+Voxy World Gen V2 uses [Mixin](https://github.com/SpongePowered/Mixin) to modify Minecraft's chunk generation and server management systems. The mod applies strategic hooks to:
+
+- Track block updates for LOD synchronization
+- Intercept chunk saves to prevent unnecessary disk writes
+- Access internal Minecraft APIs
+- Integrate with chunk loading systems
+
+## Core Mixins
+
+### BlockUpdateMixin
+
+**Target**: `ServerLevel`  
+**Purpose**: Track block updates to detect when chunks need LOD re-synchronization
+
+This mixin intercepts `sendBlockUpdated` to mark chunks as dirty when blocks change:
+
+```java
+@Inject(method = "sendBlockUpdated", at = @At("TAIL"))
+private void onBlockUpdated(BlockPos pos, BlockState oldState, BlockState newState, int flags, CallbackInfo ci) {
+    ServerLevel self = (ServerLevel) (Object) this;
+    
+    LevelChunk chunk = self.getChunkAt(pos);
+    if (chunk != null) {
+        ChunkUpdateTracker.getInstance().markDirty(chunk);
+    }
+}
+```
+
+**What it does:**
+- Hooks into Minecraft's block update system
+- Marks the containing chunk as dirty via `ChunkUpdateTracker`
+- Ensures LOD clients receive updates when terrain changes
+
+**When it runs:** Every time a block is updated on the server (placement, breaking, natural updates)
+
+---
+
+### ChunkSaveMixin
+
+**Target**: `ChunkMap`  
+**Purpose**: Suppress saves for LOD-only chunks when `saveNormalChunks` is disabled
+
+This is one of the most critical mixins for performance optimization:
+
+```java
+@Inject(method = "save", at = @At("HEAD"), cancellable = true)
+private void voxyworldgen$onSave(ChunkAccess chunk, CallbackInfoReturnable<Boolean> cir) {
+    if (Config.DATA.saveNormalChunks) return;
+
+    ChunkPos pos = chunk.getPos();
+    LodChunkTracker tracker = LodChunkTracker.getInstance();
+
+    if (!tracker.isLodOnly(this.level.dimension(), pos.toLong())) return;
+
+    if (ChunkGenerationManager.getInstance().isAnyPlayerNear(this.level.dimension(), pos)) {
+        tracker.unmark(this.level.dimension(), pos.toLong());
+        return;
+    }
+
+    tracker.unmark(this.level.dimension(), pos.toLong());
+    ((ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
+    cir.setReturnValue(false);
+}
+```
+
+**What it does:**
+1. Checks if the chunk was marked as "LOD-only" (generated for distant viewing)
+2. If a player is within view distance, allows the save to proceed normally
+3. Otherwise, clears the dirty flag and suppresses the save operation
+4. Returns `false` to indicate the chunk was not saved
+
+**Thread Safety:**
+<Warning>
+This method is called from C2ME storage threads, **not** the main server thread. All player proximity checks use thread-safe `ConcurrentHashMap` data updated each tick.
+</Warning>
+
+**Performance Impact:** Prevents writing millions of far-distance chunks to disk, dramatically reducing world size and I/O overhead.
+
+---
+
+### ChunkAccessUnsavedMixin
+
+**Target**: `ChunkAccess`  
+**Type**: Accessor interface  
+**Purpose**: Directly manipulate chunk dirty state
+
+```java
+@Mixin(ChunkAccess.class)
+public interface ChunkAccessUnsavedMixin {
+    @Accessor("unsaved")
+    void voxyworldgen$setUnsaved(boolean unsaved);
+}
+```
+
+**What it does:**
+- Provides write access to the internal `unsaved` field
+- Used by `ChunkSaveMixin` to clear dirty flags on LOD-only chunks
+- Prevents C2ME and vanilla systems from repeatedly attempting to save suppressed chunks
+
+---
+
+### ChunkMapMixin
+
+**Target**: `ChunkMap`  
+**Type**: Invoker interface  
+**Purpose**: Access internal ChunkMap methods
+
+```java
+@Mixin(ChunkMap.class)
+public interface ChunkMapMixin {
+    @Invoker("tick")
+    void invokeTick(BooleanSupplier booleanSupplier);
+
+    @Invoker("readChunk")
+    CompletableFuture<Optional<CompoundTag>> invokeReadChunk(ChunkPos pos);
+}
+```
+
+**What it does:**
+- Exposes `tick()` for manual chunk system updates (legacy, not currently used)
+- Exposes `readChunk()` for asynchronously reading chunk NBT data from disk
+
+---
+
+### MinecraftServerAccess
+
+**Target**: `MinecraftServer`  
+**Type**: Accessor interface  
+**Purpose**: Prevent server shutdown during chunk generation
+
+```java
+@Mixin(MinecraftServer.class)
+public interface MinecraftServerAccess {
+    @Accessor("emptyTicks")
+    void setEmptyTicks(int ticks);
+}
+```
+
+**What it does:**
+- Provides write access to `emptyTicks` counter
+- Reset to `0` after each chunk completes to prevent "server stopping due to inactivity"
+- Ensures servers with `stop-when-empty=true` don't shut down during background generation
+
+**Where it's used:** `ChunkGenerationManager.cleanupTask()` /workspace/source/src/main/java/com/ethan/voxyworldgenv2/core/ChunkGenerationManager.java:526
+
+---
+
+### MinecraftServerMixin
+
+**Target**: `MinecraftServer`  
+**Purpose**: Extension interface implementation (legacy)
+
+```java
+@Mixin(MinecraftServer.class)
+public abstract class MinecraftServerMixin implements MinecraftServerExtension {
+    @Override
+    public void voxyworldgen$runHousekeeping(BooleanSupplier haveTime) {
+        // removed to prevent conflicts with async/c2me mods
+    }
+
+    @Override
+    public void voxyworldgen$markHousekeeping() {
+        // no longer used
+    }
+}
+```
+
+**What it does:**
+- Implements the `MinecraftServerExtension` interface
+- Methods are no-ops to maintain compatibility
+- Previously used for manual chunk system ticking, now handled differently
+
+---
+
+### ServerChunkCacheMixin
+
+**Target**: `ServerChunkCache`  
+**Type**: Invoker interface  
+**Purpose**: Access chunk loading and distance manager APIs
+
+```java
+@Mixin(ServerChunkCache.class)
+public interface ServerChunkCacheMixin {
+    @Invoker("getChunkFutureMainThread")
+    CompletableFuture<ChunkResult<ChunkAccess>> invokeGetChunkFutureMainThread(
+        int x, int z, ChunkStatus status, boolean create
+    );
+
+    @Invoker
+    boolean invokeRunDistanceManagerUpdates();
+}
+```
+
+**What it does:**
+- `getChunkFutureMainThread`: Initiates asynchronous chunk generation to a specific status
+- `runDistanceManagerUpdates`: Flushes pending ticket operations (load/unload tickets)
+
+**Where it's used:**
+- Chunk generation: `ChunkGenerationManager.workerLoop()` /workspace/source/src/main/java/com/ethan/voxyworldgenv2/core/ChunkGenerationManager.java:318
+- Ticket processing: `ChunkGenerationManager.processPendingTickets()` /workspace/source/src/main/java/com/ethan/voxyworldgenv2/core/ChunkGenerationManager.java:512
+
+---
+
+### ServerLevelMixin
+
+**Target**: `ServerLevel`  
+**Type**: Accessor interface  
+**Purpose**: Access entity management system
+
+```java
+@Mixin(ServerLevel.class)
+public interface ServerLevelMixin {
+    @Accessor
+    PersistentEntitySectionManager<Entity> getEntityManager();
+}
+```
+
+**What it does:**
+- Provides read access to the internal entity manager
+- Used for advanced entity processing in LOD chunks (if needed)
+- Currently available but not actively used in core functionality
+
+---
+
+## Mixin Categories
+
+### Accessor Mixins
+Provide direct field access to private Minecraft internals:
+- `ChunkAccessUnsavedMixin` - chunk dirty state
+- `MinecraftServerAccess` - empty tick counter
+- `ServerLevelMixin` - entity manager
+
+### Invoker Mixins
+Expose private methods for controlled invocation:
+- `ChunkMapMixin` - chunk reading and ticking
+- `ServerChunkCacheMixin` - chunk loading and distance updates
+
+### Injection Mixins
+Hook into method execution to add custom behavior:
+- `BlockUpdateMixin` - block update tracking
+- `ChunkSaveMixin` - save interception
+- `MinecraftServerMixin` - extension interface
+
+## Thread Safety Considerations
+
+<Warning>
+**C2ME Compatibility**: Several mixins (`ChunkSaveMixin`) are called from C2ME worker threads. All shared data access uses thread-safe collections (`ConcurrentHashMap`) updated only on the main thread.
+</Warning>
+
+### Thread-Safe Mixins
+- `ChunkSaveMixin` - reads from concurrent maps only
+- All accessor/invoker mixins - safe when called from appropriate threads
+
+### Main-Thread-Only Mixins
+- `BlockUpdateMixin` - always runs on server thread
+
+## Debugging Mixin Issues
+
+If you encounter mixin-related crashes:
+
+1. **Check Mixin Logs**: Look for mixin application errors in `logs/latest.log`
+2. **Verify Fabric Loader Version**: Ensure you're using a recent Fabric Loader (0.15.0+)
+3. **Check for Conflicts**: Other mods targeting the same methods can cause conflicts
+4. **Review Mixin JSON**: The `voxyworldgenv2.mixins.json` defines all mixin targets
+
+## Related Documentation
+
+- [Events](/api/events) - How events integrate with the mixin system
+- [Distance Graph](/api/distance-graph) - The chunk prioritization system that benefits from these mixins
+- [Configuration](/configuration/settings) - Settings that control mixin behavior (saveNormalChunks)

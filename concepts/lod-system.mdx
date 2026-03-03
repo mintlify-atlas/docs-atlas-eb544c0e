@@ -1,0 +1,507 @@
+---
+title: 'LOD System'
+description: 'Level of Detail chunk management and client-server synchronization'
+---
+
+## Overview
+
+The LOD (Level of Detail) system in Voxy World Gen V2 allows chunks to be generated purely for distant rendering without persisting them to disk. This dramatically reduces storage requirements while maintaining the visual experience of distant terrain.
+
+## What Are LOD Chunks?
+
+LOD chunks are terrain chunks generated exclusively for distant rendering through the Voxy mod. Unlike normal chunks:
+
+- **Not saved to disk** (when `saveNormalChunks` is false)
+- **No entities or structures** (terrain only)
+- **Synchronized to clients** for rendering
+- **Promoted to normal** if player visits
+
+### Use Case
+
+Generate hundreds of chunks around spawn without:
+- Filling disk with GB of region files
+- Creating permanent world modifications
+- Generating unnecessary entities/features
+
+## LOD Chunk Tracking
+
+The `LodChunkTracker` maintains session-only state for LOD-generated chunks:
+
+```java
+// LodChunkTracker.java:17-28
+public final class LodChunkTracker {
+    private static final LodChunkTracker INSTANCE = new LodChunkTracker();
+    
+    // per-dimension set of packed ChunkPos longs that are LOD-only this session
+    private final Map<ResourceKey<Level>, LongSet> lodChunks = new ConcurrentHashMap<>();
+    private final AtomicLong savedSkipCount = new AtomicLong(0);
+    
+    /** Mark a chunk as having been generated only for LOD purposes. */
+    public void markLod(ResourceKey<Level> dim, long packedPos) {
+        lodChunks.computeIfAbsent(dim, k -> LongSets.synchronize(new LongOpenHashSet()))
+            .add(packedPos);
+    }
+}
+```
+
+**Key characteristics:**
+- Session-only (cleared on server restart)
+- Per-dimension tracking
+- Thread-safe using synchronized LongSets
+- Tracks skip count for statistics
+
+### Marking LOD Chunks
+
+Chunks are marked during generation when `saveNormalChunks` is disabled:
+
+```java
+// ChunkGenerationManager.java:323-328
+if (!Config.DATA.saveNormalChunks) {
+    LodChunkTracker tracker = LodChunkTracker.getInstance();
+    tracker.markLod(finalState.level.dimension(), pos.toLong());
+    ((ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
+    tracker.incrementSkipped();
+}
+```
+
+This occurs after chunk generation completes but before broadcasting LOD data.
+
+### Unmarking (Promotion)
+
+Chunks are removed from LOD tracking when players visit:
+
+```java
+// LodChunkTracker.java:35-39
+/** Remove a chunk from the LOD-only set (player claimed it). */
+public void unmark(ResourceKey<Level> dim, long packedPos) {
+    LongSet set = lodChunks.get(dim);
+    if (set != null) set.remove(packedPos);
+}
+```
+
+This happens in `ChunkSaveMixin` when a player is nearby during save.
+
+## Chunk Saving Behavior
+
+The `saveNormalChunks` config controls LOD chunk persistence:
+
+```java
+// Config.java:51-59
+public static class ConfigData {
+    public boolean enabled = true;
+    public boolean showF3MenuStats = true;
+    public int generationRadius = 128;
+    public int update_interval = 20;
+    public int maxQueueSize = 20000;
+    public int maxActiveTasks = 20;
+    public boolean saveNormalChunks = true;  // Default: save everything
+}
+```
+
+### When `saveNormalChunks = true` (Default)
+
+- **All chunks saved** to disk normally
+- Standard Minecraft behavior
+- No LOD-only tracking
+- Higher disk usage
+- Chunks persist across server restarts
+
+### When `saveNormalChunks = false`
+
+```java
+// VoxyWorldGenV2.java:22-28
+if (!Config.DATA.saveNormalChunks) {
+    LOGGER.warn("========================================");
+    LOGGER.warn("saveNormalChunks is DISABLED");
+    LOGGER.warn("Only LOD-only chunks will skip saving");
+    LOGGER.warn("Player-visited chunks WILL be saved");
+    LOGGER.warn("========================================");
+}
+```
+
+- **LOD-only chunks not saved** (marked in `LodChunkTracker`)
+- **Player-visited chunks still saved** (proximity check)
+- Reduces disk usage for distant generation
+- LOD data regenerated on server restart
+
+## Save Interception
+
+The `ChunkSaveMixin` intercepts chunk saves to implement LOD-only behavior:
+
+```java
+// ChunkSaveMixin.java:32-55
+@Inject(method = "save", at = @At("HEAD"), cancellable = true)
+private void voxyworldgen$onSave(ChunkAccess chunk, CallbackInfoReturnable<Boolean> cir) {
+    if (Config.DATA.saveNormalChunks) return;
+    
+    ChunkPos pos = chunk.getPos();
+    LodChunkTracker tracker = LodChunkTracker.getInstance();
+    
+    if (!tracker.isLodOnly(this.level.dimension(), pos.toLong())) return;
+    
+    // isAnyPlayerNear reads only from ConcurrentHashMaps updated each server tick —
+    // safe to call from C2ME storage threads
+    if (ChunkGenerationManager.getInstance().isAnyPlayerNear(this.level.dimension(), pos)) {
+        // player is nearby: unmark and let the save proceed so the chunk persists normally
+        tracker.unmark(this.level.dimension(), pos.toLong());
+        return;
+    }
+    
+    // no player nearby — clear dirty flag so C2ME also skips writing, then suppress
+    tracker.unmark(this.level.dimension(), pos.toLong());
+    ((ChunkAccessUnsavedMixin) chunk).voxyworldgen$setUnsaved(false);
+    // return false to correctly indicate to ChunkMap that the chunk was not saved to disk.
+    // Calling setUnsaved(false) above already ensures that Minecraft won't keep retrying.
+    cir.setReturnValue(false);
+}
+```
+
+### Thread Safety Note
+
+This mixin runs on **C2ME storage threads**, not the main server thread:
+
+```java
+// ChunkSaveMixin.java:23-30
+/**
+ * THREAD SAFETY: ChunkMap.save() is called from C2ME storage threads, not just
+ * the main server thread. This method must not touch any main-thread-only APIs.
+ * All player proximity data is read from ChunkGenerationManager's thread-safe
+ * cached maps (ConcurrentHashMap) which are updated on the main thread each tick.
+ */
+```
+
+### Player Proximity Check
+
+Determines if a chunk should be promoted from LOD-only to normal:
+
+```java
+// ChunkGenerationManager.java:590-605
+public boolean isAnyPlayerNear(ResourceKey<Level> dim, ChunkPos pos) {
+    var srv = this.server;
+    int viewDist = srv != null
+        ? srv.getPlayerList().getViewDistance() + 2
+        : 10;
+    for (var entry : lastPlayerPositions.entrySet()) {
+        ResourceKey<Level> playerDim = lastPlayerDimensions.get(entry.getKey());
+        if (!dim.equals(playerDim)) continue;
+        ChunkPos playerPos = entry.getValue();
+        if (Math.abs(playerPos.x - pos.x) <= viewDist
+                && Math.abs(playerPos.z - pos.z) <= viewDist) {
+            return true;
+        }
+    }
+    return false;
+}
+```
+
+**Proximity criteria:**
+- Same dimension as player
+- Within `viewDistance + 2` chunks
+- Uses cached player positions (updated each tick)
+- Thread-safe via `ConcurrentHashMap`
+
+## Client-Server Synchronization
+
+LOD data must be sent to clients for rendering since Voxy runs client-side.
+
+### Network Protocol
+
+Two packet types handle LOD communication:
+
+```java
+// NetworkHandler.java:24-25
+public static final Identifier HANDSHAKE_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":handshake");
+public static final Identifier LOD_DATA_ID = Identifier.parse(VoxyWorldGenV2.MOD_ID + ":lod_data");
+```
+
+#### HandshakePayload
+
+Sent when player joins:
+
+```java
+// NetworkHandler.java:27-43
+public record HandshakePayload(boolean serverHasMod) implements CustomPacketPayload {
+    public static final Type<HandshakePayload> TYPE = new Type<>(HANDSHAKE_ID);
+    public static final StreamCodec<FriendlyByteBuf, HandshakePayload> CODEC = 
+        CustomPacketPayload.codec(HandshakePayload::write, HandshakePayload::new);
+    
+    public void write(FriendlyByteBuf buf) {
+        buf.writeBoolean(this.serverHasMod);
+    }
+}
+```
+
+Signals that the server has Voxy World Gen V2 installed.
+
+#### LODDataPayload
+
+Transmits chunk terrain data:
+
+```java
+// NetworkHandler.java:45-84
+public record LODDataPayload(ChunkPos pos, int minY, List<SectionData> sections) 
+        implements CustomPacketPayload {
+    
+    public record SectionData(
+        int y, 
+        byte[] states,      // Block states
+        byte[] biomes,      // Biome palette
+        byte[] blockLight,  // Block light (nullable)
+        byte[] skyLight     // Sky light (nullable)
+    ) {
+        public void write(RegistryFriendlyByteBuf buf) {
+            buf.writeInt(y);
+            buf.writeByteArray(states);
+            buf.writeByteArray(biomes);
+            buf.writeNullable(blockLight, (b, a) -> b.writeByteArray(a));
+            buf.writeNullable(skyLight, (b, a) -> b.writeByteArray(a));
+        }
+    }
+}
+```
+
+Contains:
+- Chunk position
+- Minimum section Y coordinate
+- Per-section data (blocks, biomes, lighting)
+
+### Broadcasting LOD Data
+
+After chunk generation, LOD data is broadcast to nearby players:
+
+```java
+// NetworkHandler.java:95-160
+public static void broadcastLODData(LevelChunk chunk) {
+    ChunkPos pos = chunk.getPos();
+    int minY = chunk.getMinSectionY();
+    List<LODDataPayload.SectionData> sections = new ArrayList<>();
+    
+    var lightEngine = chunk.getLevel().getLightEngine();
+    
+    // Serialize each non-empty section
+    for (int i = 0; i < chunk.getSections().length; i++) {
+        LevelChunkSection section = chunk.getSections()[i];
+        if (section == null || section.hasOnlyAir()) continue;
+        
+        // Serialize block states and biomes
+        // ...
+        
+        // Extract lighting data
+        SectionPos sectionPos = SectionPos.of(pos, minY + i);
+        DataLayer bl = lightEngine.getLayerListener(LightLayer.BLOCK).getDataLayerData(sectionPos);
+        DataLayer sl = lightEngine.getLayerListener(LightLayer.SKY).getDataLayerData(sectionPos);
+        
+        sections.add(new LODDataPayload.SectionData(
+            minY + i, states, biomes, 
+            bl != null ? bl.getData().clone() : null, 
+            sl != null ? sl.getData().clone() : null
+        ));
+    }
+    
+    if (sections.isEmpty()) return;
+    
+    LODDataPayload payload = new LODDataPayload(pos, minY, sections);
+    
+    double maxDistSq = 4096.0 * 4096.0;  // 4096 block radius
+    
+    for (ServerPlayer player : PlayerTracker.getInstance().getPlayers()) {
+        if (player.level() != chunk.getLevel()) continue;
+        
+        double dx = player.getX() - (pos.getMiddleBlockX());
+        double dz = player.getZ() - (pos.getMiddleBlockZ());
+        if (dx * dx + dz * dz <= maxDistSq) {
+            ServerPlayNetworking.send(player, payload);
+            
+            // mark as synced for this player
+            var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+            if (synced != null) {
+                synced.add(pos.toLong());
+            }
+        }
+    }
+}
+```
+
+**Broadcast criteria:**
+- Same dimension as chunk
+- Within 4096 block radius
+- Section must contain blocks (non-air)
+
+**Synced chunk tracking:**
+```java
+// PlayerTracker.java:13-14
+private final Map<UUID, LongSet> syncedChunks;
+```
+
+Prevents duplicate sends of the same chunk to the same player.
+
+### Single-Player Synchronization
+
+For late-joining players or targeted updates:
+
+```java
+// NetworkHandler.java:162-212
+public static void sendLODData(ServerPlayer player, LevelChunk chunk) {
+    ChunkPos pos = chunk.getPos();
+    // ... same serialization as broadcast ...
+    
+    if (sections.isEmpty()) return;
+    
+    ServerPlayNetworking.send(player, new LODDataPayload(pos, minY, sections));
+    
+    var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+    if (synced != null) {
+        synced.add(pos.toLong());
+    }
+}
+```
+
+Used by the worker thread during catch-up synchronization (ChunkGenerationManager.java:194-229).
+
+## Voxy Integration
+
+LOD data is ingested into Voxy for client-side rendering:
+
+```java
+// ChunkGenerationManager.java:329-330
+VoxyIntegration.ingestChunk(chunk);
+NetworkHandler.broadcastLODData(chunk);
+```
+
+The `VoxyIntegration` class uses reflection to call Voxy's ingestion API:
+
+```java
+// VoxyIntegration.java:84-93
+public static void ingestChunk(LevelChunk chunk) {
+    if (!initialized) initialize();
+    if (!enabled || ingestMethod == null) return;
+    
+    try {
+        ingestMethod.invoke(chunk);
+    } catch (Throwable e) {
+        VoxyWorldGenV2.LOGGER.error("failed to ingest chunk", e);
+    }
+}
+```
+
+### Method Discovery
+
+Voxy's API may change between versions, so the integration dynamically discovers methods:
+
+```java
+// VoxyIntegration.java:38-54
+String[] commonMethods = {"ingestChunk", "tryAutoIngestChunk", "enqueueIngest", "ingest"};
+Method targetMethod = null;
+for (String methodName : commonMethods) {
+    try {
+        targetMethod = ingestServiceClass.getMethod(methodName, LevelChunk.class);
+        if (targetMethod != null) break;
+    } catch (NoSuchMethodException ignored) {}
+}
+
+if (targetMethod != null) {
+    ingestMethod = lookup.unreflect(targetMethod);
+    if (serviceInstance != null && !Modifier.isStatic(targetMethod.getModifiers())) {
+        ingestMethod = ingestMethod.bindTo(serviceInstance);
+    }
+    enabled = true;
+}
+```
+
+This provides compatibility across Voxy versions without hardcoding method names.
+
+## Chunk Persistence
+
+Completed chunks are saved to a binary cache file per dimension:
+
+```java
+// ChunkPersistence.java:16-33
+public static void save(ServerLevel level, ResourceKey<Level> dimKey, Set<Long> completedChunks) {
+    if (level == null || dimKey == null) return;
+    
+    try {
+        String dimId = getDimensionId(dimKey);
+        Path savePath = level.getServer().getWorldPath(LevelResource.ROOT)
+            .resolve("voxy_gen_" + dimId + ".bin");
+        try (DataOutputStream out = new DataOutputStream(
+                new BufferedOutputStream(Files.newOutputStream(savePath)))) {
+            synchronized(completedChunks) {
+                out.writeInt(completedChunks.size());
+                for (Long chunkPos : completedChunks) {
+                    out.writeLong(chunkPos);
+                }
+            }
+        }
+    } catch (Exception e) {
+        VoxyWorldGenV2.LOGGER.error("failed to save chunk generation cache", e);
+    }
+}
+```
+
+**Cache file format:**
+- Binary file: `world/voxy_gen_<dimension>.bin`
+- Header: `int` count of chunks
+- Body: `long[]` packed chunk positions
+
+**Example filename:**
+```
+world/voxy_gen_ResourceKey[minecraft_dimension__minecraft_overworld].bin
+```
+
+This cache tracks which chunks were previously generated, allowing the system to resume generation after server restart without rescanning the entire world.
+
+### Loading Cache
+
+```java
+// ChunkPersistence.java:35-54
+public static void load(ServerLevel level, ResourceKey<Level> dimKey, Set<Long> completedChunks) {
+    completedChunks.clear();
+    if (level == null || dimKey == null) return;
+    
+    try {
+        String dimId = getDimensionId(dimKey);
+        Path savePath = level.getServer().getWorldPath(LevelResource.ROOT)
+            .resolve("voxy_gen_" + dimId + ".bin");
+        if (Files.exists(savePath)) {
+            try (DataInputStream in = new DataInputStream(
+                    new BufferedInputStream(Files.newInputStream(savePath)))) {
+                int count = in.readInt();
+                for (int i = 0; i < count; i++) {
+                    completedChunks.add(in.readLong());
+                }
+            }
+            VoxyWorldGenV2.LOGGER.info(
+                "loaded {} chunks from voxy generation cache for {}", 
+                completedChunks.size(), dimKey
+            );
+        }
+    } catch (Exception e) {
+        VoxyWorldGenV2.LOGGER.error("failed to load chunk generation cache", e);
+    }
+}
+```
+
+Loaded during dimension setup (ChunkGenerationManager.java:447-473).
+
+<Note>
+**Important:** The persistence cache tracks generation progress, not chunk data. LOD-only chunks are not saved to region files but their positions are tracked in the cache to prevent regeneration.
+</Note>
+
+## Storage Savings
+
+Example storage comparison for 256 chunk radius:
+
+**Normal Minecraft:**
+- Chunks generated: ~200,000
+- Region files: ~2-4 GB
+- All chunks persist permanently
+
+**With LOD system (`saveNormalChunks = false`):**
+- Chunks generated: ~200,000
+- Region files: ~100-500 MB (player-visited only)
+- Cache file: ~1.6 MB (200,000 longs)
+- Storage reduction: **75-95%**
+
+<Warning>
+When `saveNormalChunks = false`, LOD-only chunks are regenerated on server restart. For Tellus worlds, this regenerates Earth-scale terrain from source data. For vanilla worlds, this uses the normal world generator.
+</Warning>

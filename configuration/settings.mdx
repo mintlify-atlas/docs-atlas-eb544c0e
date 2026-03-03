@@ -1,0 +1,321 @@
+---
+title: 'Configuration Settings'
+description: 'Complete reference for all Voxy World Gen V2 configuration options'
+icon: 'sliders'
+---
+
+## Overview
+
+All configuration settings are defined in the `ConfigData` class (Config.java:51-59). Each setting controls a specific aspect of chunk generation behavior, performance, or visual features.
+
+## General Settings
+
+### enabled
+
+<ParamField path="enabled" type="boolean" default="true">
+  Master toggle for the entire mod. When set to `false`, Voxy World Gen V2 will not generate any chunks.
+  
+  **Use case:** Temporarily disable chunk generation without uninstalling the mod.
+  
+  **Implementation:** Checked in the worker loop (ChunkGenerationManager.java:163) before processing any generation tasks.
+</ParamField>
+
+<CodeGroup>
+```json Enable the mod
+{
+  "enabled": true
+}
+```
+
+```json Disable the mod
+{
+  "enabled": false
+}
+```
+</CodeGroup>
+
+### showF3MenuStats
+
+<ParamField path="showF3MenuStats" type="boolean" default="true">
+  Controls whether generation statistics are displayed in the F3 debug menu.
+  
+  **Statistics shown:**
+  - Active generation tasks
+  - Chunks remaining in radius
+  - Generation rate (chunks/second)
+  - Queue statistics
+  - Throttle status
+  
+  **Use case:** Hide debug information for cleaner screenshots or reduce visual clutter.
+</ParamField>
+
+<CodeGroup>
+```json Show F3 stats
+{
+  "showF3MenuStats": true
+}
+```
+
+```json Hide F3 stats
+{
+  "showF3MenuStats": false
+}
+```
+</CodeGroup>
+
+## Generation Settings
+
+### generationRadius
+
+<ParamField path="generationRadius" type="integer" default="128">
+  The radius (in chunks) around each player where LOD chunks will be generated.
+  
+  **Range:** 1-512 chunks (ModMenuIntegration.java:34)
+  
+  **Calculation:** The total generation area is a square with side length `2 * generationRadius + 1`.
+  
+  **Example:** A radius of 128 generates a 257x257 chunk area (65,536 total chunks).
+  
+  **Special behavior:** When using Tellus integration, the minimum radius is automatically enforced to 128 chunks, even if you set a lower value (ChunkGenerationManager.java:185, 201).
+</ParamField>
+
+<CodeGroup>
+```json Standard radius
+{
+  "generationRadius": 128
+}
+```
+
+```json Extended radius for exploration
+{
+  "generationRadius": 256
+}
+```
+
+```json Conservative radius for low-end systems
+{
+  "generationRadius": 64
+}
+```
+</CodeGroup>
+
+<Warning>
+Larger radius values exponentially increase the number of chunks to generate. A radius of 256 generates 4x more chunks than radius 128.
+</Warning>
+
+### update_interval
+
+<ParamField path="update_interval" type="integer" default="20">
+  Legacy compatibility field preserved for backwards compatibility.
+  
+  **Status:** This setting is no longer actively used by the current generation system but is retained to prevent config parsing errors when upgrading from older versions.
+  
+  **Range:** 1-200 (ModMenuIntegration.java:40)
+  
+  **Note:** You can safely ignore this setting. It has no effect on current mod behavior.
+</ParamField>
+
+<CodeGroup>
+```json Default (no effect)
+{
+  "update_interval": 20
+}
+```
+</CodeGroup>
+
+<Tip>
+This field will be removed in a future major version. It's safe to leave at the default value.
+</Tip>
+
+## Performance Settings
+
+### maxQueueSize
+
+<ParamField path="maxQueueSize" type="integer" default="20000">
+  Maximum number of chunks that can be queued for generation.
+  
+  **Purpose:** Prevents unbounded memory growth by limiting the generation queue size.
+  
+  **Behavior:** When the queue is full, new generation requests are deferred until space becomes available.
+  
+  **Memory impact:** Higher values increase memory usage but allow smoother generation when moving quickly.
+  
+  **Recommended range:** 10,000-50,000 depending on available RAM.
+</ParamField>
+
+<CodeGroup>
+```json Default queue size
+{
+  "maxQueueSize": 20000
+}
+```
+
+```json Large queue for high-memory systems
+{
+  "maxQueueSize": 50000
+}
+```
+
+```json Smaller queue for memory-constrained systems
+{
+  "maxQueueSize": 10000
+}
+```
+</CodeGroup>
+
+### maxActiveTasks
+
+<ParamField path="maxActiveTasks" type="integer" default="20">
+  Maximum number of concurrent chunk generation tasks.
+  
+  **Range:** 1-128 (ModMenuIntegration.java:52)
+  
+  **Purpose:** Controls CPU utilization by limiting parallel generation.
+  
+  **Implementation:** Uses a `Semaphore` to throttle concurrent tasks (ChunkGenerationManager.java:69, 109).
+  
+  **Auto-configuration:** Set to 20 by default during first-run hardware detection (Config.java:26).
+  
+  **Performance impact:**
+  - Higher values: Faster generation, higher CPU usage
+  - Lower values: Slower generation, lower CPU usage
+  
+  **Recommended values:**
+  - 4-8 cores: 15-25 tasks
+  - 8-16 cores: 25-50 tasks
+  - 16+ cores: 50-100 tasks
+</ParamField>
+
+<CodeGroup>
+```json Default for most systems
+{
+  "maxActiveTasks": 20
+}
+```
+
+```json High-end system optimization
+{
+  "maxActiveTasks": 50
+}
+```
+
+```json Low-impact background generation
+{
+  "maxActiveTasks": 10
+}
+```
+</CodeGroup>
+
+<Warning>
+Setting `maxActiveTasks` too high can cause lag or stuttering. Monitor your TPS (ticks per second) and adjust accordingly.
+</Warning>
+
+## Storage Settings
+
+### saveNormalChunks
+
+<ParamField path="saveNormalChunks" type="boolean" default="true">
+  Controls whether LOD chunks are saved to disk like normal Minecraft chunks.
+  
+  **When enabled (true):**
+  - LOD chunks are saved to the world's region files
+  - Chunks persist across world reloads
+  - Increased disk space usage
+  - Faster loading on subsequent plays
+  
+  **When disabled (false):**
+  - LOD chunks are marked as unsaved (ChunkGenerationManager.java:326)
+  - Chunks are tracked internally via `LodChunkTracker`
+  - Minimal disk space usage
+  - Chunks regenerate on world reload
+  - Increment skipped chunk counter (ChunkGenerationManager.java:327)
+  
+  **Disk space impact:** Disabling can save several gigabytes for large generation radii.
+  
+  **Use case:** Disable for temporary preview worlds or when disk space is limited.
+</ParamField>
+
+<CodeGroup>
+```json Save chunks to disk
+{
+  "saveNormalChunks": true
+}
+```
+
+```json Don't save chunks (regenerate on reload)
+{
+  "saveNormalChunks": false
+}
+```
+</CodeGroup>
+
+<Warning>
+When `saveNormalChunks` is `false`, all generated LOD chunks will be lost when you reload the world. They must be regenerated, which takes time.
+</Warning>
+
+<Tip>
+For long-term survival worlds, keep `saveNormalChunks` enabled. For temporary exploration or preview worlds, disable it to save disk space.
+</Tip>
+
+## Complete Configuration Example
+
+<CodeGroup>
+```json Default Configuration
+{
+  "enabled": true,
+  "showF3MenuStats": true,
+  "generationRadius": 128,
+  "update_interval": 20,
+  "maxQueueSize": 20000,
+  "maxActiveTasks": 20,
+  "saveNormalChunks": true
+}
+```
+
+```json High-Performance System
+{
+  "enabled": true,
+  "showF3MenuStats": true,
+  "generationRadius": 256,
+  "update_interval": 20,
+  "maxQueueSize": 50000,
+  "maxActiveTasks": 50,
+  "saveNormalChunks": true
+}
+```
+
+```json Memory-Constrained System
+{
+  "enabled": true,
+  "showF3MenuStats": true,
+  "generationRadius": 64,
+  "update_interval": 20,
+  "maxQueueSize": 10000,
+  "maxActiveTasks": 10,
+  "saveNormalChunks": false
+}
+```
+
+```json Temporary Preview World
+{
+  "enabled": true,
+  "showF3MenuStats": false,
+  "generationRadius": 192,
+  "update_interval": 20,
+  "maxQueueSize": 30000,
+  "maxActiveTasks": 30,
+  "saveNormalChunks": false
+}
+```
+</CodeGroup>
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Configuration Overview" icon="gear" href="/configuration/overview">
+    Learn about the config system and ModMenu integration
+  </Card>
+  <Card title="Advanced Configuration" icon="gears" href="/configuration/advanced">
+    Hardware tuning and performance optimization strategies
+  </Card>
+</CardGroup>

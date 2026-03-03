@@ -1,80 +1,416 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Get up and running with Voxy World Gen V2 in minutes
 ---
 
-## Get started in three steps
+# Quick Start Guide
 
-Get your documentation site running locally and make your first customization.
+This guide will help you start generating chunks with Voxy World Gen V2 in just a few minutes.
 
-### Step 1: Set up your local environment
+## First Launch
+
+<Steps>
+  <Step title="Start Minecraft">
+    Launch Minecraft with your Fabric profile and load into a world (singleplayer or multiplayer).
+    
+    On first launch, the mod will automatically create a configuration file with sensible defaults based on your system resources.
+  </Step>
+  
+  <Step title="Verify Mod Is Active">
+    Press **F3** to open the debug screen.
+    
+    In the bottom-right corner, you should see the Voxy World Gen V2 status overlay:
+    
+    ```
+    [voxy worldgen v2] running
+    completed: 0
+    skipped: 0
+    remaining: <number> (<eta>)
+    active: 0
+    rate: 0.0 c/s
+    voxy: enabled
+    ```
+    
+    <Info>
+      If you don't see this overlay, ensure `showF3MenuStats` is enabled in the config (it's on by default).
+    </Info>
+  </Step>
+  
+  <Step title="Watch Chunks Generate">
+    The mod will automatically start generating chunks around your position.
+    
+    You'll see the statistics update:
+    - **completed**: Number of chunks successfully generated
+    - **rate**: Chunks generated per second
+    - **remaining**: Chunks left to generate within your configured radius
+    - **active**: Currently generating chunks
+  </Step>
+</Steps>
+
+## Accessing Configuration
+
+Voxy World Gen V2 uses ModMenu for in-game configuration (if installed).
+
+<Steps>
+  <Step title="Open Mod Menu">
+    From the main menu or pause menu, click **Mods**.
+    
+    <Note>
+      If you don't have ModMenu installed, you'll need to edit the config file manually at `config/voxyworldgenv2.json`.
+    </Note>
+  </Step>
+  
+  <Step title="Find Voxy World Gen V2">
+    Scroll through the mod list and find **Voxy World Gen V2**.
+    
+    Click on it to select it.
+  </Step>
+  
+  <Step title="Open Config Screen">
+    Click the **Configure** button (gear icon) on the right side.
+    
+    This opens the Cloth Config-powered configuration screen.
+  </Step>
+</Steps>
+
+## Essential Configuration Options
+
+Here are the most important settings you'll want to configure:
+
+### Enable/Disable Generation
+
+<ParamField path="enabled" type="boolean" default="true">
+  Master switch for chunk generation.
+  
+  - **Enable**: Chunks generate in the background
+  - **Disable**: All generation stops immediately
+  
+  Useful for temporarily pausing generation without uninstalling the mod.
+</ParamField>
+
+### Generation Radius
+
+<ParamField path="generationRadius" type="integer" default="128" min="1" max="512">
+  How far from players (in chunks) to generate terrain.
+  
+  - **64 chunks**: Small radius, fast completion (~4096 chunks total)
+  - **128 chunks**: Balanced default (~16,384 chunks total)
+  - **256 chunks**: Large radius for distant horizons (~65,536 chunks total)
+  - **512 chunks**: Maximum radius, takes considerable time
+  
+  <Warning>
+    Larger radii require significantly more time and disk space. A 512-chunk radius generates over 262,000 chunks.
+  </Warning>
+</ParamField>
+
+### Max Active Tasks
+
+<ParamField path="maxActiveTasks" type="integer" default="20" min="1" max="128">
+  Number of chunks that can generate concurrently.
+  
+  - **Lower values (5-10)**: Less CPU usage, slower generation
+  - **Default (20)**: Balanced for most systems
+  - **Higher values (40-64)**: Faster generation on powerful hardware
+  
+  <Tip>
+    Set this to roughly half your CPU core count for optimal performance.
+  </Tip>
+</ParamField>
+
+### Save Normal Chunks
+
+<ParamField path="saveNormalChunks" type="boolean" default="true">
+  Whether to save generated chunks to disk.
+  
+  - **Enable** (default): Chunks are saved normally
+  - **Disable**: LOD-only chunks skip disk saves (reduces I/O)
+  
+  <Warning>
+    When disabled, only chunks used for Voxy LOD rendering skip saves. Player-visited chunks are **always** saved to prevent data loss.
+  </Warning>
+  
+  When you disable this option, the F3 overlay will show:
+  
+  ```
+  lod suppressed: <count>
+  ```
+  
+  This indicates how many chunks skipped disk saves.
+</ParamField>
+
+### F3 Debug Stats
+
+<ParamField path="showF3MenuStats" type="boolean" default="true">
+  Shows generation statistics in the F3 debug screen.
+  
+  Disable this if you want a cleaner debug screen.
+</ParamField>
+
+## Understanding the F3 Overlay
+
+The bottom-right corner of your screen (when F3 is open) shows real-time statistics:
+
+### Singleplayer Display
+
+```
+[voxy worldgen v2] running
+completed: 1.2K
+skipped: 45
+remaining: 14.8K (2m 30s)
+active: 20
+rate: 98.5 c/s
+voxy: enabled
+```
+
+- **Status Line**: Shows current state
+  - `running`: Actively generating
+  - `throttled (low tps)`: Paused due to low server TPS
+  - `done`: All chunks in radius completed
+
+- **completed**: Successfully generated chunks
+- **skipped**: Already-existing chunks that didn't need generation
+- **lod suppressed**: Chunks that skipped disk saves (only shown when `saveNormalChunks` is disabled)
+- **remaining**: Chunks left to generate with estimated time
+- **active**: Chunks currently being generated
+- **rate**: Generation speed in chunks per second
+- **voxy**: Whether Voxy integration is active
+
+### Multiplayer Display
+
+On multiplayer servers running Voxy World Gen V2:
+
+```
+[voxy worldgen v2] connected
+rate: 45.2 c/s
+bandwidth: 2.3 MB/s
+received: 3.4K (128.5 MB)
+voxy: enabled
+```
+
+- **rate**: LOD chunks received per second
+- **bandwidth**: Network transfer rate
+- **received**: Total chunks and data received from server
+
+<Info>
+  The mod includes a client-server protocol to synchronize LOD data in multiplayer. Players receive generated chunks automatically.
+</Info>
+
+## Performance Monitoring
+
+### TPS-Based Throttling
+
+The mod automatically monitors server TPS (ticks per second):
+
+- **TPS >= 19**: Normal generation speed
+- **TPS < 19**: Generation pauses to avoid impacting gameplay
+
+When throttled, the status shows:
+
+```
+[voxy worldgen v2] throttled (low tps)
+```
+
+<Tip>
+  If you frequently see throttling, consider reducing `maxActiveTasks` to lighten the load.
+</Tip>
+
+### Recommended Settings by Hardware
+
+<Tabs>
+  <Tab title="Budget System">
+    **CPU**: 4-6 cores, **RAM**: 8GB
+    
+    ```json
+    {
+      "generationRadius": 64,
+      "maxActiveTasks": 5,
+      "maxQueueSize": 10000
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Mid-Range System">
+    **CPU**: 6-8 cores, **RAM**: 16GB
+    
+    ```json
+    {
+      "generationRadius": 128,
+      "maxActiveTasks": 20,
+      "maxQueueSize": 20000
+    }
+    ```
+    
+    This is the default configuration.
+  </Tab>
+  
+  <Tab title="High-End System">
+    **CPU**: 8+ cores, **RAM**: 32GB+
+    
+    ```json
+    {
+      "generationRadius": 256,
+      "maxActiveTasks": 40,
+      "maxQueueSize": 40000
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Dedicated Server">
+    **CPU**: 12+ cores, **RAM**: 64GB+
+    
+    ```json
+    {
+      "generationRadius": 512,
+      "maxActiveTasks": 64,
+      "maxQueueSize": 50000,
+      "saveNormalChunks": false
+    }
+    ```
+    
+    <Warning>
+      Only disable `saveNormalChunks` on dedicated servers where LOD-only chunks are acceptable.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Working with Tellus Worlds
+
+<Info>
+  If you have Tellus installed, the mod automatically detects Tellus worlds and enables optimized generation.
+</Info>
+
+When a Tellus world is detected, you'll see:
+
+```log
+[INFO] tellus world detected for minecraft:overworld, enabling fast generation
+```
+
+Tellus integration features:
+
+- **Fast Generation**: Bypasses vanilla chunk generator entirely
+- **Direct Voxy Ingestion**: Writes terrain directly into Voxy format
+- **Biome-Aware Terrain**: Realistic surface blocks based on biome data
+- **Procedural Features**: Trees and vegetation placed based on real-world data
+
+<Tip>
+  Tellus worlds enforce a minimum generation radius of 128 chunks regardless of your config setting.
+</Tip>
+
+## Manual Configuration
+
+If you don't have ModMenu, you can edit the config file directly.
+
+<Steps>
+  <Step title="Locate Config File">
+    Navigate to your Minecraft directory and open:
+    
+    ```
+    config/voxyworldgenv2.json
+    ```
+    
+    The file is created automatically on first launch.
+  </Step>
+  
+  <Step title="Edit Settings">
+    The file uses JSON format:
+    
+    ```json config/voxyworldgenv2.json
+    {
+      "enabled": true,
+      "showF3MenuStats": true,
+      "generationRadius": 128,
+      "update_interval": 20,
+      "maxQueueSize": 20000,
+      "maxActiveTasks": 20,
+      "saveNormalChunks": true
+    }
+    ```
+    
+    Edit values as needed. All settings are described in the [Configuration Reference](/configuration/settings).
+  </Step>
+  
+  <Step title="Reload Config">
+    Changes take effect when you:
+    - Restart Minecraft
+    - Reload the world
+    - Change any setting via ModMenu (triggers a reload)
+  </Step>
+</Steps>
+
+## Verifying Generation
+
+To confirm chunks are generating correctly:
+
+<Steps>
+  <Step title="Check F3 Stats">
+    Watch the `completed` counter increase and `rate` show a positive value (e.g., 50.0 c/s).
+  </Step>
+  
+  <Step title="Verify Voxy Integration">
+    If Voxy is installed, you should see distant terrain appear as chunks generate.
+    
+    Voxy's LOD system will render these chunks at lower detail from far away.
+  </Step>
+  
+  <Step title="Monitor Console Logs">
+    Check the game console for any error messages.
+    
+    Successful operation shows minimal logging. Errors will be clearly marked with `[ERROR]`.
+  </Step>
+</Steps>
+
+## Common Issues
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+  <Accordion title="Generation Not Starting">
+    **Symptoms**: `rate: 0.0 c/s`, `active: 0`, no progress
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
+    **Solutions**:
+    - Ensure `enabled` is `true` in config
+    - Check if status shows `throttled (low tps)` - if so, server performance is too low
+    - Verify you're in a supported dimension (Overworld, Nether, End)
+    - Try increasing `maxActiveTasks` if it's set very low
   </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+  
+  <Accordion title="Low Generation Speed">
+    **Symptoms**: `rate` is very low (< 10 c/s)
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
+    **Solutions**:
+    - Increase `maxActiveTasks` for more concurrent generation
+    - Check CPU usage - if at 100%, your system may be the bottleneck
+    - Reduce `generationRadius` to generate fewer total chunks
+    - Ensure no other heavy mods are running
+  </Accordion>
+  
+  <Accordion title="Voxy Not Showing LODs">
+    **Symptoms**: Chunks generate but no distant terrain appears
+    
+    **Solutions**:
+    - Verify Voxy is installed and enabled
+    - Check F3 stats shows `voxy: enabled`
+    - Ensure Voxy's render distance is set high enough in video settings
+    - Try reloading the world
+  </Accordion>
+  
+  <Accordion title="Server Lag During Generation">
+    **Symptoms**: Low TPS, gameplay stuttering
+    
+    **Solutions**:
+    - The mod should automatically throttle when TPS < 19
+    - Reduce `maxActiveTasks` to 10 or lower
+    - Reduce `generationRadius` to generate fewer chunks
+    - Allocate more RAM to the server
   </Accordion>
 </AccordionGroup>
 
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
+## Next Steps
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Configuration Reference" icon="book" href="/configuration/overview">
+    Learn about all available configuration options
+  </Card>
+  
+  <Card title="Advanced Usage" icon="graduation-cap" href="/configuration/advanced">
+    Explore advanced features and optimization
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

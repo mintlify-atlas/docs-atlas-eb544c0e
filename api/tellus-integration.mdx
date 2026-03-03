@@ -1,0 +1,293 @@
+---
+title: TellusIntegration API
+description: Integration with Tellus (Terra 1-to-1 Earth) for real-world terrain generation
+---
+
+## Overview
+
+The `TellusIntegration` class provides integration with the Tellus mod (Terra 1-to-1 Earth) to generate real-world terrain data and ingest it into Voxy's LOD system. It manages asynchronous terrain generation using a dedicated thread pool and builds detailed voxel data including terrain, water bodies, vegetation, and biome-specific surface blocks.
+
+**Package:** `com.ethan.voxyworldgenv2.integration.tellus`
+
+## Architecture
+
+The integration consists of several components:
+- **TellusIntegration** (main API): Manages initialization, worker threads, and generation queue
+- **TellusSampler**: Samples real-world terrain data (heights, cover classes, slopes, water)
+- **VoxyIngester**: Directly interfaces with Voxy's internal engine for low-level voxel insertion
+- **TellusWorldFeatures**: Places procedural trees and vegetation
+
+## Methods
+
+### isTellusWorld
+
+Checks if a given level is a Tellus (Terra 1-to-1) world.
+
+```java
+public static boolean isTellusWorld(ServerLevel level)
+```
+
+<ParamField path="level" type="ServerLevel" required>
+  The server level to check
+</ParamField>
+
+<ResponseField name="return" type="boolean">
+  `true` if the level uses Tellus's `EarthChunkGenerator`, `false` otherwise
+</ResponseField>
+
+**Behavior:**
+- Initializes the integration on first call
+- Checks if Tellus is present via `TellusSampler`
+- Inspects the chunk generator class name for "EarthChunkGenerator"
+- Returns `false` if Tellus is not installed
+
+**Example:**
+```java
+import com.ethan.voxyworldgenv2.integration.tellus.TellusIntegration;
+import net.minecraft.server.level.ServerLevel;
+
+@Override
+public void onWorldLoad(ServerLevel level) {
+    if (TellusIntegration.isTellusWorld(level)) {
+        LOGGER.info("Tellus world detected: {}", level.dimension().location());
+        // Enable real-world terrain LOD generation
+    }
+}
+```
+
+---
+
+### enqueueGenerate
+
+Enqueues asynchronous LOD generation for a specific chunk position in a Tellus world.
+
+```java
+public static void enqueueGenerate(
+    ServerLevel level,
+    ChunkPos pos,
+    Runnable onComplete
+)
+```
+
+<ParamField path="level" type="ServerLevel" required>
+  The Tellus world to generate LOD data for
+</ParamField>
+
+<ParamField path="pos" type="ChunkPos" required>
+  The chunk position to generate
+</ParamField>
+
+<ParamField path="onComplete" type="Runnable">
+  Callback invoked after generation completes (on worker thread). Pass `null` if no callback is needed
+</ParamField>
+
+**Behavior:**
+- Submits generation to a dedicated worker thread pool
+- Prevents duplicate generation requests for the same chunk
+- Invokes callback immediately if chunk is already being processed
+- Thread pool uses caller-runs policy when queue is full (max 10,000 tasks)
+- Worker threads run at `NORM_PRIORITY - 1` to avoid blocking game logic
+
+**Generation Process:**
+1. **Prefetch:** Calls `TellusSampler.prefetch()` to warm up data caches
+2. **Sample:** Retrieves terrain heights, cover classes, slopes, water data
+3. **Build:** Constructs voxel sections with terrain, water, and vegetation
+4. **Ingest:** Directly inserts sections into Voxy's world engine
+5. **Cleanup:** Removes chunk from tracking set and invokes callback
+
+**Example:**
+```java
+import net.minecraft.world.level.ChunkPos;
+
+// Generate LOD for chunks around a player
+for (int dx = -32; dx <= 32; dx++) {
+    for (int dz = -32; dz <= 32; dz++) {
+        ChunkPos pos = new ChunkPos(playerChunkX + dx, playerChunkZ + dz);
+        
+        TellusIntegration.enqueueGenerate(level, pos, () -> {
+            // Optional: log completion or update progress
+            LOGGER.debug("LOD generated for chunk {}", pos);
+        });
+    }
+}
+```
+
+**Thread Pool Configuration:**
+- **Thread count:** `max(1, availableProcessors / 2)`
+- **Queue capacity:** 10,000 tasks
+- **Rejection policy:** Caller-runs (tasks execute on calling thread when queue is full)
+- **Thread naming:** `tellus-voxy-worker-N`
+
+---
+
+### shutdown
+
+Shuts down the integration, stopping all worker threads and clearing state.
+
+```java
+public static void shutdown()
+```
+
+**Behavior:**
+- Forcibly terminates the worker thread pool (`shutdownNow()`)
+- Waits up to 2 seconds for threads to terminate
+- Clears the set of in-progress chunks
+- Resets initialization state
+- Logs shutdown completion
+
+**Example:**
+```java
+// Server shutdown hook
+@Override
+public void onServerStopping() {
+    TellusIntegration.shutdown();
+}
+```
+
+<Warning>
+  Shutdown is abrupt and does not wait for in-progress tasks to complete gracefully. Ensure no critical work is pending before calling.
+</Warning>
+
+---
+
+## Generation Details
+
+### Terrain Surface Rules
+
+The integration applies biome-specific surface blocks based on ESA cover classes and slopes:
+
+<ResponseField name="Grass/Dirt" type="Palette">
+  Default for most land biomes (grass block top, dirt filler)
+</ResponseField>
+
+<ResponseField name="Sand/Sandstone" type="Palette">
+  Deserts, beaches (sand top, sandstone filler)
+</ResponseField>
+
+<ResponseField name="Stone" type="Palette">
+  High slopes (≥3) above sea level (stone top and filler)
+</ResponseField>
+
+<ResponseField name="Snow/Ice" type="Palette">
+  ESA class 70 regions (snow block top, deepslate filler)
+</ResponseField>
+
+<ResponseField name="Water Variants" type="Palette">
+  Oceans use gravel (10%), clay (5%), or sand (85%) based on random variation
+</ResponseField>
+
+<ResponseField name="Mud" type="Palette">
+  Mangrove swamps (mud top and filler)
+</ResponseField>
+
+### Water Handling
+
+Water bodies are processed with shoreline detection:
+
+1. **Expanded Grid:** Samples a 24×24 grid (includes 4-block border) to detect shorelines beyond chunk boundaries
+2. **Distance to Shore:** Calculates distance to nearest land within 5 blocks
+3. **Shallow Slopes:** Lowers underwater terrain near shores (`targetHeight = waterLevel - distanceToShore`)
+4. **Ocean Depth:** Ensures ocean floors are at least 8 blocks below sea level
+5. **Water Surface:** Uses sampled water head heights from Tellus data
+
+### Vegetation Placement
+
+The integration places three types of vegetation:
+
+<ResponseField name="Procedural Trees" type="TellusWorldFeatures.placeProceduralTrees">
+  Large trees placed based on Tellus forest cover data, using various oak/birch/spruce log and leaf blocks
+</ResponseField>
+
+<ResponseField name="Surface Vegetation" type="TellusWorldFeatures.placeVegetation">
+  Grass, flowers, mushrooms placed on grass blocks in non-badlands/desert biomes
+</ResponseField>
+
+<ResponseField name="Underwater Vegetation" type="TellusWorldFeatures.placeUnderwaterVegetation">
+  Kelp, seagrass placed in water columns
+</ResponseField>
+
+Vegetation is stored in a `Map<BlockPos, Long>` and placed during voxel section building.
+
+### Lighting and Biomes
+
+All voxel data includes:
+- **Block ID:** From Voxy's `BlockStateMapper`
+- **Biome ID:** Sampled from Minecraft's biome source at each quart-position
+- **Sky Light:** Full brightness (level 15) for all blocks
+
+### Performance Characteristics
+
+<ResponseField name="Sampling" type="Fast">
+  Tellus data is pre-cached via `prefetch()` before sampling
+</ResponseField>
+
+<ResponseField name="Building" type="CPU-intensive">
+  Processes up to ~384 sections per chunk (24 vertical sections × 16×16 columns)
+</ResponseField>
+
+<ResponseField name="Ingestion" type="Direct">
+  Bypasses normal chunk pipelines, directly inserting into Voxy's world engine
+</ResponseField>
+
+<ResponseField name="Concurrency" type="Multi-threaded">
+  Worker pool processes multiple chunks in parallel (default: CPU cores / 2)
+</ResponseField>
+
+## Implementation Details
+
+### Initialization
+
+On first API call:
+1. Initializes `TellusSampler` (detects Tellus classes via reflection)
+2. Initializes `VoxyIngester` (resolves Voxy internal API)
+3. Creates thread pool with daemon threads
+4. Logs initialization status
+
+### Duplicate Prevention
+
+The `buildingChunks` concurrent set prevents duplicate work:
+- `add(pos)` returns `false` if chunk is already being processed
+- Chunk is removed from set in `finally` block after completion
+- Thread-safe across multiple worker threads
+
+### Error Handling
+
+- **Tellus Detection Failures:** Return `false` from `isTellusWorld`, log info
+- **Generation Failures:** Log error with chunk position, continue processing other chunks
+- **Voxy Unavailable:** Return early from generation, no ingestion occurs
+
+## Utility Methods
+
+### seedFromCoords
+
+Generates a pseudo-random seed from world coordinates (used internally for biome-based randomization).
+
+```java
+public static long seedFromCoords(int x, int y, int z)
+```
+
+<ParamField path="x" type="int" required>
+  World X coordinate
+</ParamField>
+
+<ParamField path="y" type="int" required>
+  World Y coordinate
+</ParamField>
+
+<ParamField path="z" type="int" required>
+  World Z coordinate
+</ParamField>
+
+<ResponseField name="return" type="long">
+  Deterministic pseudo-random seed based on coordinates
+</ResponseField>
+
+**Example:**
+```java
+long seed = TellusIntegration.seedFromCoords(blockX, blockY, blockZ);
+Random random = new Random(seed);
+```
+
+## Source Reference
+
+See `TellusIntegration.java:20-329` for the complete implementation.

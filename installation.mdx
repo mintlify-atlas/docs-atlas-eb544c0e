@@ -1,0 +1,241 @@
+---
+title: Installation
+description: How to install Voxy World Gen V2 and its dependencies
+---
+
+# Installation
+
+This guide walks you through installing Voxy World Gen V2 and all required dependencies.
+
+## Prerequisites
+
+Before installing, ensure your system meets these requirements:
+
+<CardGroup cols={2}>
+  <Card title="Minecraft" icon="pickaxe">
+    **Version**: 1.21.6 - 1.21.11
+    
+    Versions below 1.21.6 are not supported. The mod is tested on 1.21.11.
+  </Card>
+  
+  <Card title="Java" icon="mug-hot">
+    **Version**: Java 21
+    
+    Java 21 is **required**. The mod will not work with older Java versions.
+  </Card>
+  
+  <Card title="Fabric Loader" icon="loom">
+    **Version**: >= 0.16.0
+    
+    Install Fabric Loader from [fabricmc.net](https://fabricmc.net/use/)
+  </Card>
+  
+  <Card title="Operating System" icon="desktop">
+    **Platforms**: Windows, macOS, Linux
+    
+    The mod is server-side compatible and works on dedicated servers.
+  </Card>
+</CardGroup>
+
+## Required Dependencies
+
+These mods must be installed for Voxy World Gen V2 to function:
+
+<Steps>
+  <Step title="Fabric API">
+    Download the latest version of [Fabric API](https://modrinth.com/mod/fabric-api) for your Minecraft version.
+    
+    Place the downloaded `.jar` file in your `mods` folder.
+  </Step>
+  
+  <Step title="Cloth Config">
+    Download [Cloth Config](https://modrinth.com/mod/cloth-config) version **15.0.127 or newer**.
+    
+    This provides the configuration system used by the mod.
+    
+    Place the downloaded `.jar` file in your `mods` folder.
+  </Step>
+</Steps>
+
+## Optional Dependencies
+
+These mods enhance Voxy World Gen V2 but are not required:
+
+### Voxy (Highly Recommended)
+
+<Info>
+  Voxy is the primary reason to use this mod. Without Voxy, chunks will still generate but won't provide distant LOD rendering.
+</Info>
+
+Download [Voxy](https://modrinth.com/mod/voxy) and place it in your `mods` folder.
+
+**What Voxy provides:**
+- Distant terrain rendering (LOD) up to 1024+ chunks
+- Automatic chunk ingestion from generation
+- Significant render distance improvements
+
+### Tellus (Optional)
+
+<Info>
+  Tellus provides Earth 1:1 scale terrain. Voxy World Gen V2 includes optimized generation for Tellus worlds.
+</Info>
+
+Download [Tellus](https://github.com/Yucareux/Tellus) if you want to explore real-world terrain.
+
+**Tellus integration features:**
+- Fast generation bypassing vanilla chunk generator
+- Direct Voxy ingestion of terrain data
+- Biome-aware surface rules for realistic terrain
+- Procedural tree and vegetation placement
+
+### ModMenu (Recommended)
+
+<Info>
+  ModMenu provides an in-game configuration GUI. Without it, you'll need to edit the config file manually.
+</Info>
+
+Download [ModMenu](https://modrinth.com/mod/modmenu) to access the configuration screen from the game's mod menu.
+
+## Installing the Mod
+
+<Steps>
+  <Step title="Download Voxy World Gen V2">
+    Download the latest release from the mod's download page.
+    
+    Make sure to download the version matching your Minecraft version (1.21.6-1.21.11).
+  </Step>
+  
+  <Step title="Place in Mods Folder">
+    Locate your Minecraft installation directory:
+    
+    - **Windows**: `%appdata%\.minecraft\mods`
+    - **macOS**: `~/Library/Application Support/minecraft/mods`
+    - **Linux**: `~/.minecraft/mods`
+    
+    Place the downloaded `voxyworldgenv2-<version>.jar` file in the `mods` folder.
+  </Step>
+  
+  <Step title="Verify Installation">
+    Launch Minecraft with the Fabric profile.
+    
+    Check the game log for this message:
+    
+    ```log
+    [INFO] voxy world gen v2 initializing
+    ```
+    
+    If Voxy is installed, you should also see:
+    
+    ```log
+    [INFO] voxy integration initialized (enabled: true, raw: true)
+    ```
+  </Step>
+</Steps>
+
+## Building from Source
+
+If you want to build the mod yourself or contribute to development:
+
+<Steps>
+  <Step title="Clone the Repository">
+    ```bash
+    git clone https://github.com/iSeeEthan/voxy_worldgen_v2.git
+    cd voxy_worldgen_v2
+    ```
+  </Step>
+  
+  <Step title="Build with Gradle">
+    Ensure Java 21 is installed and set as your `JAVA_HOME`.
+    
+    ```bash
+    ./gradlew build
+    ```
+    
+    On Windows:
+    
+    ```bash
+    gradlew.bat build
+    ```
+  </Step>
+  
+  <Step title="Locate Built Artifact">
+    After a successful build, find the compiled mod in:
+    
+    ```
+    build/libs/voxyworldgenv2-<version>.jar
+    ```
+    
+    Copy this file to your `mods` folder.
+  </Step>
+</Steps>
+
+<Warning>
+  Building from source requires a complete development environment. Most users should download pre-built releases instead.
+</Warning>
+
+## Troubleshooting Installation
+
+### Mod Not Loading
+
+<AccordionGroup>
+  <Accordion title="Check Java Version">
+    Ensure you're running Java 21. In the Minecraft launcher, check your Java version:
+    
+    1. Open Minecraft Launcher
+    2. Go to Installations → Your Fabric profile → Edit
+    3. Check "Java Executable" path
+    4. Verify it points to Java 21
+  </Accordion>
+  
+  <Accordion title="Verify Fabric Loader Version">
+    Open the Minecraft Launcher and check your Fabric profile shows version 0.16.0 or newer.
+    
+    If not, reinstall Fabric Loader from [fabricmc.net](https://fabricmc.net/use/).
+  </Accordion>
+  
+  <Accordion title="Check for Conflicting Mods">
+    Some chunk generation mods may conflict. Try removing other world generation or pre-generation mods temporarily.
+  </Accordion>
+  
+  <Accordion title="Review Game Logs">
+    Check the latest log file at:
+    
+    `.minecraft/logs/latest.log`
+    
+    Look for error messages mentioning `voxyworldgenv2`.
+  </Accordion>
+</AccordionGroup>
+
+### Voxy Integration Not Working
+
+<AccordionGroup>
+  <Accordion title="Verify Voxy Is Installed">
+    Check that `voxy-<version>.jar` is present in your `mods` folder.
+    
+    Look for this log message:
+    
+    ```log
+    [INFO] voxy integration initialized (enabled: true)
+    ```
+    
+    If you see `voxy not present, integration disabled`, Voxy isn't being detected.
+  </Accordion>
+  
+  <Accordion title="Check Voxy Version Compatibility">
+    Ensure your Voxy version is compatible with Minecraft 1.21.6-1.21.11.
+    
+    The mod uses reflection to detect Voxy methods and should work across multiple Voxy versions.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start Guide" icon="rocket" href="/quickstart">
+    Learn how to configure and use the mod
+  </Card>
+  
+  <Card title="Configuration Reference" icon="gear" href="/configuration">
+    Explore all available configuration options
+  </Card>
+</CardGroup>

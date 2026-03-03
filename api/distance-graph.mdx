@@ -1,0 +1,502 @@
+---
+title: DistanceGraph System
+description: Hierarchical chunk prioritization and work-finding algorithm
+---
+
+## Overview
+
+The `DistanceGraph` is a hierarchical spatial data structure that tracks chunk generation state across infinite worlds and efficiently finds the nearest ungenerated chunks to any player. It solves the fundamental challenge:
+
+> **Given millions of potentially-required chunks, how do we find the next 16 to generate in O(log n) time?**
+
+## Architecture
+
+The system uses a 4-level hierarchy where each level groups chunks into progressively larger regions:
+
+```
+Level 3 (Root):     2048×2048 chunks  (512×512 nodes)  ← Entry point
+Level 2:             256×256 chunks   (8×8 L2 nodes)
+Level 1:              32×32 chunks    (8×8 L1 nodes)
+Level 0 (Batch):       4×4 chunks     (16 chunks)      ← Work unit
+```
+
+### Node Structure
+
+```java
+private static class Node {
+    final int level;            // 0-3, which hierarchy level
+    final int x, z;             // position in level-space coordinates
+    volatile long fullMask = 0; // 64-bit mask: 1 = child fully generated
+    final Map<Integer, Object> children = new ConcurrentHashMap<>();
+}
+```
+
+**Key properties:**
+- `fullMask`: Each bit represents one of 64 child nodes/batches (8×8 grid)
+- `children`: Only stores **partially complete** children (memory optimization)
+- **Level 1 children**: `Integer` bitmask (16 bits for 4×4 chunks)
+- **Level 2+ children**: `Node` references
+
+### Memory Optimization
+
+The graph uses **sparse storage**:
+- Fully generated regions: Only a bit in parent's `fullMask` (1 bit)
+- Empty regions: No storage at all (0 bytes)
+- Partially generated: Full `Node` object
+
+**Example**: A 10,000×10,000 chunk area with 90% completion uses ~100 KB instead of ~100 MB.
+
+---
+
+## Core Operations
+
+### markChunkCompleted
+
+**Purpose**: Mark a single chunk as generated and propagate completion up the hierarchy
+
+```java
+public void markChunkCompleted(int cx, int cz) {
+    int bx = cx >> BATCH_SIZE_SHIFT;  // Convert chunk coords to batch coords
+    int bz = cz >> BATCH_SIZE_SHIFT;
+    int bit = (cx & 3) + ((cz & 3) << 2);  // Which chunk within the batch (0-15)
+
+    int rx = bx >> ROOT_SIZE_SHIFT;
+    int rz = bz >> ROOT_SIZE_SHIFT;
+    long rootKey = ChunkPos.asLong(rx, rz);
+
+    Node root = roots.computeIfAbsent(rootKey, k -> new Node(3, rx, rz));
+    recursiveMark(root, bx, bz, bit);
+}
+```
+
+**Algorithm:**
+1. Convert chunk coordinates `(cx, cz)` to batch coordinates `(bx, bz)`
+2. Calculate which bit within the batch (0-15)
+3. Find or create the root node for this region
+4. Recursively traverse down, marking nodes complete
+
+**Recursive marking** /workspace/source/src/main/java/com/ethan/voxyworldgenv2/core/DistanceGraph.java:49:
+```java
+private void recursiveMark(Node node, int bx, int bz, int bit) {
+    int idx = getLocalIndex(node.level, bx, bz);  // Which child (0-63)
+    if ((node.fullMask & (1L << idx)) != 0) return;  // Already complete
+
+    if (node.level == 1) {
+        // Level 1: child is an Integer bitmask for 16 chunks
+        Integer mask = (Integer) node.children.getOrDefault(idx, 0);
+        mask |= (1 << bit);
+        if (mask == 0xFFFF) {  // All 16 chunks complete?
+            synchronized(node) {
+                node.fullMask |= (1L << idx);
+                node.children.remove(idx);  // Free memory!
+            }
+        } else {
+            node.children.put(idx, mask);
+        }
+    } else {
+        // Higher level: child is another Node
+        Node child = (Node) node.children.computeIfAbsent(idx, k -> createChild());
+        recursiveMark(child, bx, bz, bit);
+        if (child.isFull()) {
+            synchronized(node) {
+                node.fullMask |= (1L << idx);
+                node.children.remove(idx);  // Free child node!
+            }
+        }
+    }
+}
+```
+
+**Why it's fast:** O(4) = O(1) - always exactly 4 levels to traverse
+
+---
+
+### findWork
+
+**Purpose**: Find the nearest ungenerated 4×4 batch to a player
+
+```java
+public List<ChunkPos> findWork(ChunkPos center, int radiusChunks, Set<Long> trackedBatches)
+```
+
+**Parameters:**
+- `center`: Player's chunk position
+- `radiusChunks`: Maximum search radius (from config `generationRadius`)
+- `trackedBatches`: Set of batch keys already queued (prevents duplicates)
+
+**Algorithm**: Dijkstra-like priority queue traversal
+
+```java
+PriorityQueue<WorkItem> queue = new PriorityQueue<>(Comparator.comparingDouble(i -> i.distSq));
+
+// Seed queue with all root nodes within radius
+for (int rx = rbxMin; rx <= rbxMax; rx++) {
+    for (int rz = rbzMin; rz <= rbzMax; rz++) {
+        Node root = roots.get(ChunkPos.asLong(rx, rz));
+        double dSq = getDistSq(rx, rz, rootSize, cbx, cbz);
+        if (dSq <= (double)rb * rb) {
+            queue.add(new WorkItem(root, 3, rx, rz, dSq));
+        }
+    }
+}
+
+while (!queue.isEmpty()) {
+    WorkItem item = queue.poll();  // Get closest node
+    if (item.node != null && item.node.isFull()) continue;  // Skip complete
+    
+    if (item.level == 0) {
+        // Found an incomplete batch!
+        if (trackedBatches.add(key)) {
+            return generateBatchList(item.x, item.z);
+        }
+        continue;
+    }
+    
+    // Expand children and add to queue
+    for (int i = 0; i < 64; i++) {
+        if (item.node != null && (item.node.fullMask & (1L << i)) != 0) continue;
+        
+        int cx = (item.x << 3) + (i & 7);
+        int cz = (item.z << 3) + (i >> 3);
+        double dSq = getDistSq(cx, cz, childSize, cbx, cbz);
+        
+        if (dSq <= maxDistSq) {
+            Object child = (item.node == null) ? null : item.node.children.get(i);
+            queue.add(new WorkItem(childNode, childLevel, cx, cz, dSq));
+        }
+    }
+}
+```
+
+**Why it's efficient:**
+1. **Early pruning**: Skip entire regions outside search radius
+2. **Sparse traversal**: Only visit nodes that exist or have ungenerated children
+3. **Distance sorting**: Always process closest nodes first
+4. **Empty space handling**: Treat null nodes as incomplete (allows finding work in unexplored areas)
+
+**Worst-case complexity:** O(r²) where r = radius in batches, but typically much better due to pruning
+
+---
+
+### Distance Calculation
+
+**Purpose**: Calculate squared distance from a point to the nearest edge of a rectangular node
+
+```java
+private double getDistSq(int nx, int nz, int size, int cbx, int cbz) {
+    // Distance to nearest edge of node
+    double dx = Math.max(0, Math.max((double)nx * size - cbx, (double)cbx - (nx + 1) * size + 1));
+    double dz = Math.max(0, Math.max((double)nz * size - cbz, (double)cbz - (nz + 1) * size + 1));
+    return dx * dx + dz * dz;
+}
+```
+
+**Why squared distance?**
+- Avoids expensive `sqrt()` calls
+- Comparison order is preserved: if `a² < b²` then `a < b`
+- Used for priority queue sorting and radius checks
+
+**Visualization:**
+```
+        Point (cbx, cbz)
+           ↓
+    ┌──────┼──────┐
+    │      │      │
+    │   Node      │
+    │  (nx, nz)   │
+    │   size×size │
+    └─────────────┘
+          ↑
+      dx = 0 (point inside node)
+```
+
+If the point is inside the node, `dx = dz = 0`, giving distance 0.
+
+---
+
+### countMissingInRange
+
+**Purpose**: Estimate how many chunks still need generation within a radius
+
+```java
+public int countMissingInRange(ChunkPos center, int radiusChunks)
+```
+
+**Used by**: `ChunkGenerationManager.restartScan()` to update the "Remaining" counter in the debug overlay
+
+**Algorithm**: Recursive traversal with estimation
+
+```java
+private int recursiveCount(Node node, int level, int nx, int nz, int cbx, int cbz, int rb) {
+    if (getDistSq(nx, nz, size, cbx, cbz) > (double)rb * rb) return 0;  // Outside radius
+    if (node != null && node.isFull()) return 0;  // Fully generated
+
+    if (level == 0) return 1;  // Count this batch
+
+    if (node == null) {
+        // Empty space: estimate chunks in circle
+        if (level == 1) {
+            int c = 0;
+            for (int i = 0; i < 64; i++) {
+                int bx = (nx << 3) + (i & 7);
+                int bz = (nz << 3) + (i >> 3);
+                if (getDistSq(bx, bz, 1, cbx, cbz) <= (double)rb * rb) c += 16;
+            }
+            return c;
+        }
+        // Higher level: recurse into virtual children
+        int c = 0;
+        for (int i = 0; i < 64; i++) {
+            int cx = (nx << 3) + (i & 7);
+            int cz = (nz << 3) + (i >> 3);
+            c += recursiveCount(null, level - 1, cx, cz, cbx, cbz, rb);
+        }
+        return c;
+    }
+
+    // Partially complete: count incomplete children
+    int c = 0;
+    for (int i = 0; i < 64; i++) {
+        if ((node.fullMask & (1L << i)) != 0) continue;  // Child complete
+        Object child = node.children.get(i);
+        c += recursiveCount((Node)child, level - 1, cx, cz, cbx, cbz, rb);
+    }
+    return c;
+}
+```
+
+**Performance**: O(visible nodes) - only traverses sparse tree
+
+---
+
+### collectCompletedInRange
+
+**Purpose**: Gather completed chunks near a player for LOD synchronization
+
+```java
+public void collectCompletedInRange(
+    ChunkPos center, 
+    int radiusChunks, 
+    LongSet alreadySynced, 
+    List<ChunkPos> out, 
+    int maxResults
+)
+```
+
+**Used by**: Worker thread to send LOD data to clients /workspace/source/src/main/java/com/ethan/voxyworldgenv2/core/ChunkGenerationManager.java:203
+
+**Algorithm**: Priority-queue traversal collecting chunks from near to far
+
+```java
+PriorityQueue<CollectItem> queue = new PriorityQueue<>(Comparator.comparingDouble(i -> i.distSq));
+
+// Seed with root nodes
+for (int rx = rbxMin; rx <= rbxMax; rx++) {
+    for (int rz = rbzMin; rz <= rbzMax; rz++) {
+        Node root = roots.get(ChunkPos.asLong(rx, rz));
+        if (root == null) continue;
+        queue.add(new CollectItem(root, false, 0, 3, rx, rz, dSq));
+    }
+}
+
+while (!queue.isEmpty() && out.size() < maxResults) {
+    CollectItem item = queue.poll();
+    
+    if (item.level == 0) {
+        // Reached a batch: collect completed chunks
+        int mask = item.isVirtualFull ? 0xFFFF : item.mask;
+        for (int i = 0; i < 16; i++) {
+            if ((mask & (1 << i)) != 0) {
+                ChunkPos pos = new ChunkPos((item.x << 2) + lx, (item.z << 2) + lz);
+                if (!alreadySynced.contains(pos.toLong())) {
+                    out.add(pos);
+                    if (out.size() >= maxResults) return;
+                }
+            }
+        }
+        continue;
+    }
+    
+    // Expand children
+    for (int i = 0; i < 64; i++) {
+        if (item.isVirtualFull || (item.node.fullMask & (1L << i)) != 0) {
+            queue.add(new CollectItem(null, true, 0xFFFF, childLevel, cx, cz, dSq));
+        } else if (item.node.children.get(i) instanceof Node childNode) {
+            queue.add(new CollectItem(childNode, false, 0, childLevel, cx, cz, dSq));
+        }
+    }
+}
+```
+
+**Features:**
+- **Near-to-far ordering**: Priority queue ensures closest chunks sync first
+- **Deduplication**: Skips chunks in `alreadySynced` set
+- **Batch limiting**: Stops after `maxResults` (typically 64)
+- **Virtual full nodes**: Propagates full state without needing the actual node reference
+
+---
+
+## Batch Tracking System
+
+The `DistanceGraph` works in tandem with `ChunkGenerationManager` to track in-flight batches:
+
+### Batch Keys
+
+```java
+public static long getBatchKey(int cx, int cz) {
+    return ChunkPos.asLong(cx >> 2, cz >> 2);
+}
+```
+
+Batch keys are stored in `trackedBatches` to prevent `findWork()` from returning the same batch twice.
+
+### Batch Lifecycle
+
+```java
+// In ChunkGenerationManager.workerLoop()
+List<ChunkPos> batch = distanceGraph.findWork(center, radius, trackedBatches);
+long batchKey = DistanceGraph.getBatchKey(batch.get(0).x, batch.get(0).z);
+state.batchCounters.put(batchKey, new AtomicInteger(batch.size()));
+
+// ... generate chunks ...
+
+// In decrementBatch() after each chunk completes
+AtomicInteger counter = state.batchCounters.get(batchKey);
+if (counter != null && counter.decrementAndGet() <= 0) {
+    state.trackedBatches.remove(batchKey);
+    state.batchCounters.remove(batchKey);
+}
+```
+
+**Why batches?**
+- **Amortizes overhead**: 16 chunks share one `findWork()` call
+- **Spatial locality**: Nearby chunks often load faster due to caching
+- **Progress tracking**: Easier to estimate completion
+
+---
+
+## Thread Safety
+
+<Warning>
+The `DistanceGraph` is accessed from **multiple threads**:
+- **Main thread**: Calls `collectCompletedInRange()` during tick
+- **Worker thread**: Calls `findWork()` and `countMissingInRange()`
+- **Async completion threads**: Call `markChunkCompleted()`
+</Warning>
+
+### Synchronization Strategy
+
+1. **Node.fullMask**: Marked `volatile` - reads/writes are atomic
+2. **Node.children**: `ConcurrentHashMap` - thread-safe
+3. **roots**: `ConcurrentHashMap` - thread-safe
+4. **Critical sections**: `synchronized(node)` when updating both `fullMask` and `children`
+
+**Race condition prevention:**
+```java
+if (child.isFull()) {
+    synchronized(node) {
+        node.fullMask |= (1L << idx);
+        node.children.remove(idx);  // Must be atomic with mask update
+    }
+}
+```
+
+Without synchronization, another thread could:
+1. See the old `fullMask`
+2. Try to access `children.get(idx)`
+3. Get `null` because it was already removed
+4. Crash with `NullPointerException`
+
+---
+
+## Performance Characteristics
+
+| Operation | Time Complexity | Space Complexity |
+|-----------|----------------|------------------|
+| `markChunkCompleted` | O(1) - 4 levels | O(log n) nodes |
+| `findWork` | O(r²) worst, O(r log r) typical | O(r²) queue items |
+| `countMissingInRange` | O(visible nodes) | O(1) stack depth |
+| `collectCompletedInRange` | O(k log k) where k=results | O(r²) queue items |
+
+**Memory scaling:**
+- Empty world: ~0 KB
+- 50% complete world: ~500 KB per 100M chunk area
+- 99% complete world: ~50 KB per 100M chunk area
+
+---
+
+## Visualization Example
+
+Player at chunk `(100, 100)`, radius 32 chunks:
+
+```
+Level 3 (Roots):        Level 2:              Level 1:          Level 0 (Batches):
+┌─────────────┐         ┌─────────────┐       ┌───────┐         ┌───────┐
+│ Root (0,0)  │────────→│ Node (0,0)  │──────→│ Batch │────────→│ ████░ │
+│ fullMask: 1 │         │ fullMask: 7 │       │ mask: │         │ ████░ │
+│ 2048×2048   │         │ 256×256     │       │ 0xFFF0│         │ ████░ │
+│             │         │             │       │ 32×32 │         │ ████░ │
+│   [Player]  │         │   [Player]  │       │  ↑    │         │  4×4  │
+│      ●      │         │      ●      │       │ [P]   │         │       │
+└─────────────┘         └─────────────┘       └───────┘         └───────┘
+                                                                 ████ = done
+                                                                 ░░░░ = TODO
+```
+
+`findWork()` traverses: `Root → Node → Batch → Return 4 missing chunks`
+
+---
+
+## Common Patterns
+
+### Prioritizing Multiple Players
+
+```java
+// In ChunkGenerationManager.workerLoop()
+for (ServerPlayer player : players) {
+    DimensionState ds = getOrSetupState((ServerLevel) player.level());
+    List<ChunkPos> batch = ds.distanceGraph.findWork(
+        player.chunkPosition(), 
+        radius, 
+        ds.trackedBatches
+    );
+    if (batch != null) {
+        activeState = ds;
+        break;  // Found work for this player
+    }
+}
+```
+
+**Result**: First player with missing chunks gets priority.
+
+### Checking Progress
+
+```java
+int total = distanceGraph.countMissingInRange(center, radius);
+int completed = totalInRadius - total;
+double progress = 100.0 * completed / totalInRadius;
+```
+
+### Syncing New Players
+
+```java
+// On player join
+LongSet synced = new LongOpenHashSet();
+List<ChunkPos> toSync = new ArrayList<>();
+distanceGraph.collectCompletedInRange(player.chunkPosition(), radius, synced, toSync, 1000);
+
+// Send LOD data for all collected chunks
+for (ChunkPos pos : toSync) {
+    LevelChunk chunk = level.getChunk(pos.x, pos.z);
+    NetworkHandler.sendLODData(player, chunk);
+}
+```
+
+---
+
+## Related Documentation
+
+- [Events](/api/events) - How the manager coordinates with the distance graph
+- [Mixins](/api/mixins) - Low-level hooks that feed completion data
+- [Configuration](/configuration/settings) - `generationRadius` affects search space
+- [Performance](/concepts/performance) - Tuning batch size and throttling

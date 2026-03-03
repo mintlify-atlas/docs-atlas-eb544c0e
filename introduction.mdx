@@ -1,0 +1,90 @@
+---
+title: Introduction
+description: High-performance passive chunk generation for Minecraft with Voxy and Tellus integration
+---
+
+# Voxy World Gen V2
+
+Voxy World Gen V2 is a high-performance Minecraft Fabric mod that generates chunks passively in the background, optimized for use with Voxy's LOD (Level of Detail) rendering system. Unlike traditional pre-generation mods, it intelligently generates chunks around players without blocking gameplay.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Background Generation" icon="layer-group">
+    Generates chunks asynchronously in the background without impacting gameplay performance. Automatic TPS monitoring throttles generation when server load is high.
+  </Card>
+  
+  <Card title="Voxy Integration" icon="cube">
+    Seamlessly ingests generated chunks into Voxy for distant terrain rendering. Supports both standard chunk ingestion and optimized raw section ingestion for maximum performance.
+  </Card>
+  
+  <Card title="Tellus Support" icon="earth-americas">
+    Native integration with Tellus (Earth terrain mod). Automatically detects Tellus worlds and uses optimized generation pathways with custom terrain sampling and biome-aware surface rules.
+  </Card>
+  
+  <Card title="Configurable Performance" icon="sliders">
+    Fine-tune generation speed, queue sizes, and radius through an intuitive ModMenu config screen. Auto-configures based on available system resources on first run.
+  </Card>
+</CardGroup>
+
+## How It Works
+
+Voxy World Gen V2 operates on a sophisticated distance-based priority system:
+
+1. **Player Tracking**: Monitors all connected players and their positions across dimensions
+2. **Distance Graph**: Maintains a graph of chunk distances from players, prioritizing closer chunks
+3. **Smart Batching**: Generates chunks in batches to minimize overhead and maximize throughput
+4. **Adaptive Throttling**: Automatically reduces generation rate when server TPS drops below 19
+5. **LOD Optimization**: Generated chunks can skip disk saves if only used for LOD rendering (configurable)
+
+## Performance Features
+
+- **Multi-threaded Architecture**: Separate worker thread handles generation scheduling
+- **Configurable Concurrency**: Control active task count (default: 20 concurrent chunks)
+- **Memory Efficient**: Manages queue sizes to prevent memory exhaustion (default: 20,000 chunk limit)
+- **Network Optimized**: Client-server protocol for multiplayer LOD data synchronization
+- **F3 Debug Overlay**: Real-time statistics showing generation rate, remaining chunks, and ETA
+
+## Architecture Highlights
+
+The mod is built with performance and compatibility in mind:
+
+- **Dimension-Aware**: Separate generation state per dimension with automatic persistence
+- **C2ME Compatible**: Thread-safe player proximity checks for C2ME storage threads
+- **Clean Ticket Management**: Proper chunk ticket lifecycle prevents memory leaks
+- **Voxy Auto-Detection**: Uses reflection to dynamically detect and integrate with Voxy
+- **Tellus Fast Path**: Bypasses vanilla generation entirely for Tellus worlds, generating directly into Voxy's format
+
+## Get Started
+
+<CardGroup cols={3}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the mod and its dependencies
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Configure and start generating chunks
+  </Card>
+  
+  <Card title="Configuration" icon="gear" href="/configuration/overview">
+    Understand all configuration options
+  </Card>
+</CardGroup>
+
+## Technical Specifications
+
+- **Minecraft Version**: 1.21.6 - 1.21.11
+- **Loader**: Fabric >= 0.16.0
+- **Java Version**: 21 (required)
+- **Dependencies**: Fabric API, Cloth Config >= 15.0.127
+- **Optional**: Voxy (for LOD rendering), Tellus (for Earth terrain), ModMenu (for config GUI)
+
+## What Makes It Different?
+
+Unlike other chunk pre-generation mods:
+
+- **Non-blocking**: Never freezes the game or server
+- **Voxy-First**: Designed specifically for Voxy's LOD system
+- **Smart Saving**: Can skip saving LOD-only chunks to reduce disk I/O
+- **Dimension Support**: Handles Overworld, Nether, End, and custom dimensions
+- **Tellus Optimized**: Special fast path for Earth terrain generation

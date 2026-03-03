@@ -1,0 +1,332 @@
+---
+title: ChunkGenerationManager
+description: Core singleton managing all chunk generation tasks and worker threads
+---
+
+The `ChunkGenerationManager` is the central orchestrator for Voxy World Gen V2's chunk pre-generation system. It manages a dedicated worker thread, tracks generation progress across dimensions, and coordinates with the Minecraft server's chunk loading system.
+
+## Singleton Pattern
+
+### getInstance()
+
+Retrieve the singleton instance of ChunkGenerationManager.
+
+```java
+public static ChunkGenerationManager getInstance()
+```
+
+<ResponseField name="return" type="ChunkGenerationManager">
+  The singleton instance
+</ResponseField>
+
+**Example:**
+
+```java
+ChunkGenerationManager manager = ChunkGenerationManager.getInstance();
+```
+
+## Lifecycle Methods
+
+### initialize()
+
+Initialize the manager and start the worker thread. Must be called once on server startup.
+
+```java
+public void initialize(MinecraftServer server)
+```
+
+<ParamField path="server" type="MinecraftServer" required>
+  The Minecraft server instance
+</ParamField>
+
+**Example:**
+
+```java
+ChunkGenerationManager manager = ChunkGenerationManager.getInstance();
+manager.initialize(minecraftServer);
+```
+
+### shutdown()
+
+Cleanly shut down the manager, stop the worker thread, and save all state.
+
+```java
+public void shutdown()
+```
+
+**Example:**
+
+```java
+ChunkGenerationManager.getInstance().shutdown();
+```
+
+### tick()
+
+Process pending chunk tickets, reload config if scheduled, and update stats. Call this every server tick.
+
+```java
+public void tick()
+```
+
+**Example:**
+
+```java
+// In your server tick handler
+ChunkGenerationManager.getInstance().tick();
+```
+
+## Configuration
+
+### scheduleConfigReload()
+
+Schedule a config reload on the next tick. Thread-safe.
+
+```java
+public void scheduleConfigReload()
+```
+
+**Example:**
+
+```java
+// After modifying config file
+Config.save();
+ChunkGenerationManager.getInstance().scheduleConfigReload();
+```
+
+## Control Methods
+
+### setPauseCheck()
+
+Set a custom pause condition that stops generation when true.
+
+```java
+public void setPauseCheck(BooleanSupplier check)
+```
+
+<ParamField path="check" type="java.util.function.BooleanSupplier" required>
+  A supplier that returns `true` to pause generation, `false` to allow it
+</ParamField>
+
+**Example:**
+
+```java
+// Pause generation when server is under heavy load
+manager.setPauseCheck(() -> {
+    return server.getTickTime() > 50; // Pause if tick time exceeds 50ms
+});
+
+// Unpause by setting to always return false
+manager.setPauseCheck(() -> false);
+```
+
+## Query Methods
+
+### isAnyPlayerNear()
+
+Thread-safe check if any player is near a chunk position. Safe to call from C2ME storage threads.
+
+```java
+public boolean isAnyPlayerNear(ResourceKey<Level> dim, ChunkPos pos)
+```
+
+<ParamField path="dim" type="ResourceKey<Level>" required>
+  The dimension to check
+</ParamField>
+
+<ParamField path="pos" type="ChunkPos" required>
+  The chunk position to check
+</ParamField>
+
+<ResponseField name="return" type="boolean">
+  `true` if any player is within view distance + 2 chunks
+</ResponseField>
+
+**Example:**
+
+```java
+ResourceKey<Level> dimension = Level.OVERWORLD;
+ChunkPos chunkPos = new ChunkPos(10, 20);
+
+if (manager.isAnyPlayerNear(dimension, chunkPos)) {
+    // Player is nearby, skip background generation
+}
+```
+
+### getStats()
+
+Get the generation statistics tracker.
+
+```java
+public GenerationStats getStats()
+```
+
+<ResponseField name="return" type="GenerationStats">
+  Statistics object with methods:
+  - `getQueued()` - Total chunks queued
+  - `getCompleted()` - Total chunks completed
+  - `getFailed()` - Total chunks failed
+  - `getSkipped()` - Total chunks skipped (already existed)
+  - `getChunksPerSecond()` - Rolling 10-second average generation rate
+</ResponseField>
+
+**Example:**
+
+```java
+GenerationStats stats = manager.getStats();
+long completed = stats.getCompleted();
+double rate = stats.getChunksPerSecond();
+
+VoxyWorldGenV2.LOGGER.info("Completed {} chunks at {} chunks/sec", completed, rate);
+```
+
+### getActiveTaskCount()
+
+Get the number of currently active generation tasks.
+
+```java
+public int getActiveTaskCount()
+```
+
+<ResponseField name="return" type="int">
+  Number of chunks currently being generated
+</ResponseField>
+
+**Example:**
+
+```java
+int active = manager.getActiveTaskCount();
+System.out.println("Active tasks: " + active);
+```
+
+### getRemainingInRadius()
+
+Get the number of chunks remaining to generate in the current dimension's generation radius.
+
+```java
+public int getRemainingInRadius()
+```
+
+<ResponseField name="return" type="int">
+  Number of chunks remaining in radius around players
+</ResponseField>
+
+**Example:**
+
+```java
+int remaining = manager.getRemainingInRadius();
+if (remaining == 0) {
+    player.sendSystemMessage(Component.literal("Pre-generation complete!"));
+}
+```
+
+### isThrottled()
+
+Check if generation is currently throttled due to low TPS.
+
+```java
+public boolean isThrottled()
+```
+
+<ResponseField name="return" type="boolean">
+  `true` if generation is paused due to server performance
+</ResponseField>
+
+**Example:**
+
+```java
+if (manager.isThrottled()) {
+    player.sendSystemMessage(Component.literal("Generation paused: server TPS low"));
+}
+```
+
+### getQueueSize()
+
+Get the size of the pending chunk queue.
+
+```java
+public int getQueueSize()
+```
+
+<ResponseField name="return" type="int">
+  Number of chunks in the queue (currently always returns 0 as queue is managed internally)
+</ResponseField>
+
+## Complete Usage Example
+
+```java
+import com.ethan.voxyworldgenv2.core.ChunkGenerationManager;
+import com.ethan.voxyworldgenv2.core.Config;
+import com.ethan.voxyworldgenv2.stats.GenerationStats;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
+
+public class CustomGenerationController {
+    private final ChunkGenerationManager manager;
+    
+    public CustomGenerationController() {
+        this.manager = ChunkGenerationManager.getInstance();
+    }
+    
+    public void onServerStart(MinecraftServer server) {
+        // Initialize the manager
+        manager.initialize(server);
+        
+        // Set up custom pause condition
+        manager.setPauseCheck(() -> {
+            // Pause if TPS drops below 15
+            return server.getTickTime() > 66.67;
+        });
+    }
+    
+    public void onServerTick() {
+        // Must call every tick
+        manager.tick();
+    }
+    
+    public void printStatus() {
+        GenerationStats stats = manager.getStats();
+        
+        System.out.println("=== Generation Status ===");
+        System.out.println("Active tasks: " + manager.getActiveTaskCount());
+        System.out.println("Remaining: " + manager.getRemainingInRadius());
+        System.out.println("Completed: " + stats.getCompleted());
+        System.out.println("Rate: " + String.format("%.2f", stats.getChunksPerSecond()) + " c/s");
+        System.out.println("Throttled: " + manager.isThrottled());
+    }
+    
+    public boolean shouldSaveChunk(ChunkPos pos) {
+        // Don't save LOD chunks if players are far away
+        return manager.isAnyPlayerNear(Level.OVERWORLD, pos);
+    }
+    
+    public void onServerStop() {
+        manager.shutdown();
+    }
+}
+```
+
+## Thread Safety
+
+All public methods are thread-safe:
+
+- `getInstance()`, `initialize()`, `shutdown()`, `tick()` - Safe from server thread
+- `isAnyPlayerNear()` - Explicitly designed for C2ME storage threads
+- `getStats()`, `getActiveTaskCount()`, `getRemainingInRadius()` - Use atomic operations
+- `setPauseCheck()`, `scheduleConfigReload()` - Thread-safe atomic operations
+
+## Internal Architecture
+
+The manager maintains:
+
+- **Worker Thread**: Dedicated background thread (`Voxy-WorldGen-Worker`) that finds and dispatches generation work
+- **Per-Dimension State**: Tracks completed chunks, distance graphs, and batch counters for each dimension
+- **Throttling**: Semaphore-based throttling respects `Config.DATA.maxActiveTasks`
+- **TPS Monitoring**: Automatically pauses when server performance degrades
+- **Ticket Queue**: C2ME-compatible queued ticket operations processed on main thread
+
+## See Also
+
+- [Config API](/api/config) - Configuration management
+- [PlayerTracker API](/api/player-tracker) - Player position tracking
+- [GenerationStats](/concepts/performance) - Statistics tracking (if you create this page)

@@ -1,0 +1,431 @@
+---
+title: PlayerTracker
+description: Singleton tracking online players and their synced LOD chunks
+---
+
+The `PlayerTracker` singleton maintains a thread-safe registry of all online players and tracks which LOD chunks have been synced to each player. This enables efficient incremental LOD updates.
+
+## Singleton Pattern
+
+### getInstance()
+
+Retrieve the singleton instance of PlayerTracker.
+
+```java
+public static PlayerTracker getInstance()
+```
+
+<ResponseField name="return" type="PlayerTracker">
+  The singleton instance
+</ResponseField>
+
+**Example:**
+
+```java
+PlayerTracker tracker = PlayerTracker.getInstance();
+```
+
+## Player Management
+
+### addPlayer()
+
+Register a player and initialize their synced chunks set.
+
+```java
+public void addPlayer(ServerPlayer player)
+```
+
+<ParamField path="player" type="ServerPlayer" required>
+  The player to track
+</ParamField>
+
+**Example:**
+
+```java
+import com.ethan.voxyworldgenv2.core.PlayerTracker;
+import net.minecraft.server.level.ServerPlayer;
+
+// On player join
+public void onPlayerJoin(ServerPlayer player) {
+    PlayerTracker.getInstance().addPlayer(player);
+}
+```
+
+### removePlayer()
+
+Unregister a player and clear their synced chunks.
+
+```java
+public void removePlayer(ServerPlayer player)
+```
+
+<ParamField path="player" type="ServerPlayer" required>
+  The player to stop tracking
+</ParamField>
+
+**Example:**
+
+```java
+// On player disconnect
+public void onPlayerLeave(ServerPlayer player) {
+    PlayerTracker.getInstance().removePlayer(player);
+}
+```
+
+### clear()
+
+Remove all players and clear all synced chunk data.
+
+```java
+public void clear()
+```
+
+**Example:**
+
+```java
+// On server shutdown
+public void onServerStop() {
+    PlayerTracker.getInstance().clear();
+}
+```
+
+## Query Methods
+
+### getPlayers()
+
+Get an unmodifiable collection of all tracked players.
+
+```java
+public Collection<ServerPlayer> getPlayers()
+```
+
+<ResponseField name="return" type="Collection<ServerPlayer>">
+  Unmodifiable view of all online players. Thread-safe for iteration.
+</ResponseField>
+
+**Example:**
+
+```java
+Collection<ServerPlayer> players = tracker.getPlayers();
+
+for (ServerPlayer player : players) {
+    System.out.println("Player: " + player.getName().getString());
+    System.out.println("Position: " + player.chunkPosition());
+}
+```
+
+### getPlayerCount()
+
+Get the number of currently tracked players.
+
+```java
+public int getPlayerCount()
+```
+
+<ResponseField name="return" type="int">
+  Number of online players
+</ResponseField>
+
+**Example:**
+
+```java
+int count = tracker.getPlayerCount();
+
+if (count == 0) {
+    System.out.println("No players online, pausing generation");
+}
+```
+
+### getSyncedChunks()
+
+Get the set of chunk positions that have been synced to a specific player.
+
+```java
+public it.unimi.dsi.fastutil.longs.LongSet getSyncedChunks(UUID uuid)
+```
+
+<ParamField path="uuid" type="java.util.UUID" required>
+  The player's unique ID
+</ParamField>
+
+<ResponseField name="return" type="it.unimi.dsi.fastutil.longs.LongSet">
+  Thread-safe set of chunk positions (as packed longs via `ChunkPos.toLong()`). Returns `null` if player not found.
+</ResponseField>
+
+**Example:**
+
+```java
+import it.unimi.dsi.fastutil.longs.LongSet;
+import net.minecraft.world.level.ChunkPos;
+
+UUID playerUUID = player.getUUID();
+LongSet syncedChunks = tracker.getSyncedChunks(playerUUID);
+
+if (syncedChunks != null) {
+    ChunkPos pos = new ChunkPos(10, 20);
+    long posKey = pos.toLong();
+    
+    if (!syncedChunks.contains(posKey)) {
+        // This chunk hasn't been synced yet, send LOD data
+        sendLODData(player, pos);
+        syncedChunks.add(posKey);
+    }
+}
+```
+
+## Synced Chunks Tracking
+
+The `PlayerTracker` maintains a `LongSet` for each player containing the packed chunk positions that have been synced. This prevents redundant LOD packets.
+
+### How Synced Chunks Work
+
+1. **Pack chunk position** to a long using `ChunkPos.toLong()`:
+   ```java
+   ChunkPos pos = new ChunkPos(x, z);
+   long posKey = pos.toLong();
+   ```
+
+2. **Check if synced** before sending LOD data:
+   ```java
+   LongSet synced = tracker.getSyncedChunks(player.getUUID());
+   if (synced != null && !synced.contains(posKey)) {
+       // Not synced yet, send LOD data
+   }
+   ```
+
+3. **Mark as synced** after sending:
+   ```java
+   synced.add(posKey);
+   ```
+
+4. **Unpack if needed**:
+   ```java
+   int x = ChunkPos.getX(posKey);
+   int z = ChunkPos.getZ(posKey);
+   ```
+
+## Complete Usage Example
+
+```java
+import com.ethan.voxyworldgenv2.core.PlayerTracker;
+import it.unimi.dsi.fastutil.longs.LongSet;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.LevelChunk;
+
+import java.util.Collection;
+import java.util.UUID;
+
+public class LODSyncHandler {
+    
+    private final PlayerTracker tracker = PlayerTracker.getInstance();
+    
+    // Register player on join
+    public void onPlayerJoin(ServerPlayer player) {
+        tracker.addPlayer(player);
+        System.out.println("Registered player: " + player.getName().getString());
+        System.out.println("Total players: " + tracker.getPlayerCount());
+    }
+    
+    // Unregister player on disconnect
+    public void onPlayerLeave(ServerPlayer player) {
+        tracker.removePlayer(player);
+        System.out.println("Unregistered player: " + player.getName().getString());
+    }
+    
+    // Send LOD data only if not already synced
+    public void sendLODIfNeeded(ServerPlayer player, LevelChunk chunk) {
+        UUID playerUUID = player.getUUID();
+        LongSet syncedChunks = tracker.getSyncedChunks(playerUUID);
+        
+        if (syncedChunks == null) {
+            System.out.println("Player not tracked: " + player.getName().getString());
+            return;
+        }
+        
+        ChunkPos pos = chunk.getPos();
+        long posKey = pos.toLong();
+        
+        // Check if already synced
+        if (syncedChunks.contains(posKey)) {
+            // Already synced, skip
+            return;
+        }
+        
+        // Send LOD data
+        sendLODPacket(player, chunk);
+        
+        // Mark as synced
+        syncedChunks.add(posKey);
+    }
+    
+    // Broadcast to all players, tracking sync status
+    public void broadcastLOD(LevelChunk chunk) {
+        Collection<ServerPlayer> players = tracker.getPlayers();
+        
+        for (ServerPlayer player : players) {
+            sendLODIfNeeded(player, chunk);
+        }
+    }
+    
+    // Check how many chunks a player has synced
+    public int getSyncedCount(UUID playerUUID) {
+        LongSet syncedChunks = tracker.getSyncedChunks(playerUUID);
+        return syncedChunks != null ? syncedChunks.size() : 0;
+    }
+    
+    // Find players who need LOD updates in a region
+    public void syncRegion(int centerX, int centerZ, int radius) {
+        Collection<ServerPlayer> players = tracker.getPlayers();
+        
+        for (ServerPlayer player : players) {
+            LongSet syncedChunks = tracker.getSyncedChunks(player.getUUID());
+            if (syncedChunks == null) continue;
+            
+            int syncedInRegion = 0;
+            int totalInRegion = 0;
+            
+            for (int x = centerX - radius; x <= centerX + radius; x++) {
+                for (int z = centerZ - radius; z <= centerZ + radius; z++) {
+                    totalInRegion++;
+                    long posKey = ChunkPos.asLong(x, z);
+                    if (syncedChunks.contains(posKey)) {
+                        syncedInRegion++;
+                    }
+                }
+            }
+            
+            System.out.println(player.getName().getString() + " synced: " 
+                + syncedInRegion + "/" + totalInRegion);
+        }
+    }
+    
+    private void sendLODPacket(ServerPlayer player, LevelChunk chunk) {
+        // Your LOD packet sending logic
+    }
+}
+```
+
+## Event Integration
+
+Integrate with Fabric/Forge events:
+
+```java
+import com.ethan.voxyworldgenv2.core.PlayerTracker;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+
+public class VoxyEventHandlers {
+    
+    public static void register() {
+        // Fabric example
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            PlayerTracker.getInstance().addPlayer(handler.getPlayer());
+        });
+        
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+            PlayerTracker.getInstance().removePlayer(handler.getPlayer());
+        });
+    }
+}
+```
+
+## Thread Safety
+
+- **All methods are thread-safe**
+- Uses `ConcurrentHashMap.newKeySet()` for player storage
+- Synced chunks are stored in synchronized `LongSet` instances
+- `getPlayers()` returns unmodifiable collection safe for concurrent iteration
+
+### Safe Concurrent Access
+
+```java
+// Safe to call from any thread
+Collection<ServerPlayer> players = tracker.getPlayers();
+
+// Safe to iterate while other threads modify
+for (ServerPlayer player : players) {
+    // Process player
+}
+
+// Safe to check from worker threads
+LongSet synced = tracker.getSyncedChunks(uuid);
+if (synced != null && synced.contains(posKey)) {
+    // Already synced
+}
+```
+
+## Internal Data Structures
+
+```java
+private final Set<ServerPlayer> players; // ConcurrentHashMap.newKeySet()
+private final Map<UUID, LongSet> syncedChunks; // ConcurrentHashMap
+```
+
+- `players`: Thread-safe set of active players
+- `syncedChunks`: Maps player UUID to synchronized `LongSet` of chunk positions
+
+## Common Patterns
+
+### Pattern 1: Incremental LOD Sync
+
+```java
+public void syncNearbyLOD(ServerPlayer player, int radius) {
+    LongSet syncedChunks = tracker.getSyncedChunks(player.getUUID());
+    if (syncedChunks == null) return;
+    
+    ChunkPos center = player.chunkPosition();
+    
+    for (int x = -radius; x <= radius; x++) {
+        for (int z = -radius; z <= radius; z++) {
+            ChunkPos pos = new ChunkPos(center.x + x, center.z + z);
+            long posKey = pos.toLong();
+            
+            if (!syncedChunks.contains(posKey)) {
+                LevelChunk chunk = getChunkIfLoaded(pos);
+                if (chunk != null) {
+                    sendLODData(player, chunk);
+                    syncedChunks.add(posKey);
+                }
+            }
+        }
+    }
+}
+```
+
+### Pattern 2: Batch Processing
+
+```java
+public void processBatch(List<ChunkPos> batch) {
+    Collection<ServerPlayer> players = tracker.getPlayers();
+    
+    for (ChunkPos pos : batch) {
+        LevelChunk chunk = loadChunk(pos);
+        long posKey = pos.toLong();
+        
+        for (ServerPlayer player : players) {
+            LongSet synced = tracker.getSyncedChunks(player.getUUID());
+            if (synced != null && !synced.contains(posKey)) {
+                sendLODData(player, chunk);
+                synced.add(posKey);
+            }
+        }
+    }
+}
+```
+
+### Pattern 3: Cleanup on Dimension Change
+
+```java
+public void onPlayerChangeDimension(ServerPlayer player) {
+    // Clear synced chunks when player changes dimension
+    LongSet syncedChunks = tracker.getSyncedChunks(player.getUUID());
+    if (syncedChunks != null) {
+        syncedChunks.clear();
+    }
+}
+```
+
+## See Also
+
+- [ChunkGenerationManager API](/api/chunk-generation-manager) - Core generation manager that uses PlayerTracker
+- [Network Protocol](/api/network-handler) - LOD data packet format

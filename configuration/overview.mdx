@@ -1,0 +1,131 @@
+---
+title: 'Configuration Overview'
+description: 'Learn how Voxy World Gen V2 configuration works'
+icon: 'gear'
+---
+
+## Configuration System
+
+Voxy World Gen V2 uses a JSON-based configuration system that provides both file-based and in-game configuration options. The mod automatically creates a default configuration file on first run with hardware-optimized settings.
+
+## Configuration File Location
+
+The configuration file is located at:
+
+```
+config/voxyworldgenv2.json
+```
+
+This file is stored in your Minecraft instance's config directory. The exact path depends on your launcher and instance setup.
+
+<Tip>
+The config directory is typically `.minecraft/config/` for vanilla launchers, or in your instance folder for modded launchers like MultiMC or Prism Launcher.
+</Tip>
+
+## How Configuration Works
+
+The configuration system is implemented in `Config.java` (config/Config.java:12-60) and follows this workflow:
+
+### First Run Auto-Configuration
+
+When you launch the mod for the first time, Voxy World Gen V2 automatically:
+
+1. Detects that no configuration file exists (Config.java:20)
+2. Analyzes your system hardware:
+   - CPU core count via `Runtime.getRuntime().availableProcessors()`
+   - Available memory via `Runtime.getRuntime().maxMemory()`
+3. Creates optimized default settings (Config.java:26-27)
+4. Saves the configuration file (Config.java:29)
+
+### Configuration Loading
+
+On subsequent launches, the mod:
+
+1. Loads the existing `voxyworldgenv2.json` file (Config.java:33-34)
+2. Parses the JSON using Gson with pretty printing enabled
+3. Populates the `Config.DATA` object with your settings
+4. Applies these settings to the chunk generation system
+
+### JSON Format
+
+The configuration uses a simple, human-readable JSON structure:
+
+<CodeGroup>
+```json Example Configuration
+{
+  "enabled": true,
+  "showF3MenuStats": true,
+  "generationRadius": 128,
+  "update_interval": 20,
+  "maxQueueSize": 20000,
+  "maxActiveTasks": 20,
+  "saveNormalChunks": true
+}
+```
+</CodeGroup>
+
+## In-Game Configuration (ModMenu)
+
+Voxy World Gen V2 integrates with [ModMenu](https://modrinth.com/mod/modmenu) and [Cloth Config](https://modrinth.com/mod/cloth-config) to provide an in-game configuration screen.
+
+### Accessing the Config Screen
+
+1. Install ModMenu (required dependency)
+2. Open the Mods menu from the main screen or pause menu
+3. Find "Voxy World Gen V2" in the mod list
+4. Click the config button (gear icon)
+
+### Features
+
+The in-game config screen provides:
+
+- **Boolean toggles** with tooltips for on/off settings
+- **Sliders** for numeric values with min/max constraints
+- **Input fields** for advanced numeric settings
+- **Real-time validation** to prevent invalid values
+- **Automatic save** when you apply changes
+
+<Warning>
+Changes made through the ModMenu config screen are saved immediately and trigger a configuration reload via `scheduleConfigReload()` (ModMenuIntegration.java:66).
+</Warning>
+
+## Configuration Reload Mechanism
+
+When you modify settings through ModMenu:
+
+1. The config screen saves changes to `Config.DATA`
+2. Calls `Config.save()` to write the JSON file (ModMenuIntegration.java:65)
+3. Triggers `scheduleConfigReload()` on the ChunkGenerationManager (ModMenuIntegration.java:66)
+4. On the next tick, the system:
+   - Reloads configuration from disk (ChunkGenerationManager.java:358)
+   - Updates the throttle capacity based on new `maxActiveTasks` (ChunkGenerationManager.java:359)
+   - Restarts the chunk scanning process with new settings (ChunkGenerationManager.java:360)
+
+<Tip>
+You don't need to restart Minecraft when changing settings through ModMenu. The configuration reload happens automatically and takes effect immediately.
+</Tip>
+
+## Manual Configuration Editing
+
+You can also edit `config/voxyworldgenv2.json` directly with a text editor:
+
+1. Close Minecraft completely
+2. Open `config/voxyworldgenv2.json` in your text editor
+3. Modify the values as needed
+4. Save the file
+5. Restart Minecraft
+
+<Warning>
+Always close Minecraft before manually editing the config file, or your changes may be overwritten.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration Settings" icon="sliders" href="/configuration/settings">
+    Detailed documentation for each configuration option
+  </Card>
+  <Card title="Advanced Configuration" icon="gears" href="/configuration/advanced">
+    Performance tuning and advanced optimization
+  </Card>
+</CardGroup>

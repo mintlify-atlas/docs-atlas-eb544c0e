@@ -1,0 +1,399 @@
+---
+title: NetworkHandler API
+description: Client-server networking for LOD data synchronization and handshake
+---
+
+## Overview
+
+The `NetworkHandler` class manages client-server communication for LOD (Level of Detail) chunk data. It defines custom network payloads for handshake negotiation and chunk data transmission, using Fabric's networking API.
+
+**Package:** `com.ethan.voxyworldgenv2.network`
+
+## Network Protocol
+
+The mod uses two custom packet types:
+
+<ResponseField name="Handshake" type="voxyworldgenv2:handshake">
+  Bidirectional handshake to confirm both client and server have the mod installed
+</ResponseField>
+
+<ResponseField name="LOD Data" type="voxyworldgenv2:lod_data">
+  Server-to-client packet containing serialized chunk section data with lighting and biomes
+</ResponseField>
+
+### Packet Identifiers
+
+```java
+public static final Identifier HANDSHAKE_ID = 
+    Identifier.parse("voxyworldgenv2:handshake");
+
+public static final Identifier LOD_DATA_ID = 
+    Identifier.parse("voxyworldgenv2:lod_data");
+```
+
+## Payloads
+
+### HandshakePayload
+
+Confirms mod presence on client or server.
+
+```java
+public record HandshakePayload(boolean serverHasMod) 
+    implements CustomPacketPayload
+```
+
+<ParamField path="serverHasMod" type="boolean" required>
+  `true` if the server has the mod installed, `false` otherwise
+</ParamField>
+
+**Serialization Format:**
+- **Size:** 1 byte
+- **Content:** Boolean flag
+
+**Example:**
+```java
+import com.ethan.voxyworldgenv2.network.NetworkHandler.HandshakePayload;
+
+// Server sends handshake to client
+HandshakePayload handshake = new HandshakePayload(true);
+ServerPlayNetworking.send(player, handshake);
+```
+
+---
+
+### LODDataPayload
+
+Transmits chunk section data including block states, biomes, and lighting.
+
+```java
+public record LODDataPayload(
+    ChunkPos pos,
+    int minY,
+    List<SectionData> sections
+) implements CustomPacketPayload
+```
+
+<ParamField path="pos" type="ChunkPos" required>
+  The chunk position (X, Z coordinates)
+</ParamField>
+
+<ParamField path="minY" type="int" required>
+  Minimum section Y coordinate (e.g., -4 for worlds starting at Y=-64)
+</ParamField>
+
+<ParamField path="sections" type="List<SectionData>" required>
+  List of non-empty chunk sections with serialized data
+</ParamField>
+
+#### SectionData
+
+Contains serialized data for a single 16×16×16 chunk section.
+
+```java
+public record SectionData(
+    int y,
+    byte[] states,
+    byte[] biomes,
+    byte[] blockLight,
+    byte[] skyLight
+)
+```
+
+<ParamField path="y" type="int" required>
+  Section Y coordinate (vertical index)
+</ParamField>
+
+<ParamField path="states" type="byte[]" required>
+  Serialized `PalettedContainer<BlockState>` data
+</ParamField>
+
+<ParamField path="biomes" type="byte[]" required>
+  Serialized `PalettedContainer<Biome>` data
+</ParamField>
+
+<ParamField path="blockLight" type="byte[]">
+  2048 bytes (4096 nibbles) of block light data, or `null` if not available
+</ParamField>
+
+<ParamField path="skyLight" type="byte[]">
+  2048 bytes (4096 nibbles) of sky light data, or `null` if not available
+</ParamField>
+
+**Serialization Notes:**
+- Block states and biomes use Minecraft's `PalettedContainer` format
+- Data is registry-aware (uses `RegistryFriendlyByteBuf`)
+- Light data uses `DataLayer` format (2048 bytes per section)
+- Null light arrays are explicitly supported (sent as nullable fields)
+
+**Example:**
+```java
+import com.ethan.voxyworldgenv2.network.NetworkHandler.LODDataPayload;
+import com.ethan.voxyworldgenv2.network.NetworkHandler.LODDataPayload.SectionData;
+import net.minecraft.world.level.ChunkPos;
+
+import java.util.List;
+
+// Send LOD data to client
+ChunkPos pos = new ChunkPos(10, 20);
+List<SectionData> sections = List.of(
+    new SectionData(4, statesBytes, biomesBytes, blockLightBytes, skyLightBytes)
+);
+LODDataPayload payload = new LODDataPayload(pos, -4, sections);
+ServerPlayNetworking.send(player, payload);
+```
+
+## Methods
+
+### init
+
+Initializes the network handler by registering packet types with Fabric.
+
+```java
+public static void init()
+```
+
+**Behavior:**
+- Registers `HandshakePayload` for both C2S (client-to-server) and S2C (server-to-client)
+- Registers `LODDataPayload` for S2C only
+- Must be called during mod initialization (typically in `onInitialize()`)
+- Logs "voxy networking initialized" on success
+
+**Example:**
+```java
+import com.ethan.voxyworldgenv2.network.NetworkHandler;
+
+@Override
+public void onInitialize() {
+    NetworkHandler.init();
+    // ... other initialization
+}
+```
+
+<Warning>
+  Call `init()` exactly once during mod initialization. Calling multiple times may cause registration conflicts.
+</Warning>
+
+---
+
+### broadcastLODData
+
+Broadcasts LOD chunk data to all nearby players.
+
+```java
+public static void broadcastLODData(LevelChunk chunk)
+```
+
+<ParamField path="chunk" type="LevelChunk" required>
+  The chunk to serialize and broadcast
+</ParamField>
+
+**Behavior:**
+1. **Serialization:** Converts non-empty sections to `SectionData` records
+   - Serializes block states using `PalettedContainer.write()`
+   - Serializes biomes using `PalettedContainer.write()`
+   - Extracts block and sky light from the light engine
+2. **Player Selection:** Sends to all players within 4096 blocks (squared distance)
+3. **Tracking:** Marks chunks as synced for each player in `PlayerTracker`
+4. **Early Exit:** Returns immediately if all sections are air
+
+**Range:** Broadcasts to players within a 4096-block horizontal radius.
+
+**Example:**
+```java
+import net.minecraft.world.level.chunk.LevelChunk;
+
+// After generating a chunk
+LevelChunk chunk = level.getChunk(pos.x, pos.z);
+NetworkHandler.broadcastLODData(chunk);
+```
+
+**Performance Notes:**
+- Uses Netty's `Unpooled.buffer()` for serialization
+- Properly releases buffers in `finally` blocks to prevent memory leaks
+- Clones light data arrays to avoid concurrent modification
+- Skips empty sections to reduce packet size
+
+---
+
+### sendLODData
+
+Sends LOD chunk data to a specific player.
+
+```java
+public static void sendLODData(ServerPlayer player, LevelChunk chunk)
+```
+
+<ParamField path="player" type="ServerPlayer" required>
+  The player to send data to
+</ParamField>
+
+<ParamField path="chunk" type="LevelChunk" required>
+  The chunk to serialize and send
+</ParamField>
+
+**Behavior:**
+- Identical serialization process to `broadcastLODData`
+- Sends only to the specified player (no range check)
+- Marks chunk as synced in `PlayerTracker` for the player
+- Returns immediately if all sections are air
+
+**Example:**
+```java
+import net.minecraft.server.level.ServerPlayer;
+
+// Send LOD data when player logs in
+@Override
+public void onPlayerLogin(ServerPlayer player) {
+    // Send chunks around player spawn
+    for (int dx = -16; dx <= 16; dx++) {
+        for (int dz = -16; dz <= 16; dz++) {
+            ChunkPos pos = new ChunkPos(spawnX + dx, spawnZ + dz);
+            LevelChunk chunk = level.getChunk(pos.x, pos.z);
+            NetworkHandler.sendLODData(player, chunk);
+        }
+    }
+}
+```
+
+**Use Cases:**
+- Player login/respawn (send nearby chunks)
+- Manual synchronization after terrain modification
+- Targeted updates for specific players
+
+---
+
+### sendHandshake
+
+Sends a handshake packet to a player to confirm server-side mod presence.
+
+```java
+public static void sendHandshake(ServerPlayer player)
+```
+
+<ParamField path="player" type="ServerPlayer" required>
+  The player to send the handshake to
+</ParamField>
+
+**Behavior:**
+- Sends `HandshakePayload(true)` to the player
+- Typically called immediately after player login
+- Client can respond with their own handshake to confirm bidirectional support
+
+**Example:**
+```java
+import net.minecraft.server.level.ServerPlayer;
+
+// Send handshake when player joins
+@Override
+public void onPlayerLogin(ServerPlayer player) {
+    NetworkHandler.sendHandshake(player);
+}
+```
+
+**Client-Side Handling:**
+The client should register a handler for `HandshakePayload` to detect server-side mod presence and respond with its own handshake if needed.
+
+## Implementation Details
+
+### Serialization Process
+
+Both `broadcastLODData` and `sendLODData` follow the same serialization pipeline:
+
+1. **Section Filtering:** Skip null or air-only sections (`section.hasOnlyAir()`)
+2. **Buffer Creation:** Allocate Netty `ByteBuf` instances for states and biomes
+3. **State Serialization:**
+   ```java
+   RegistryFriendlyByteBuf statesBuf = new RegistryFriendlyByteBuf(
+       new FriendlyByteBuf(statesRaw), 
+       chunk.getLevel().registryAccess()
+   );
+   section.getStates().write(statesBuf);
+   byte[] states = new byte[statesBuf.readableBytes()];
+   statesBuf.readBytes(states);
+   ```
+4. **Biome Serialization:** Same process using `section.getBiomes()`
+5. **Light Extraction:**
+   ```java
+   SectionPos sectionPos = SectionPos.of(pos, minY + i);
+   DataLayer bl = lightEngine.getLayerListener(LightLayer.BLOCK)
+       .getDataLayerData(sectionPos);
+   DataLayer sl = lightEngine.getLayerListener(LightLayer.SKY)
+       .getDataLayerData(sectionPos);
+   ```
+6. **Data Cloning:** Light arrays are cloned to prevent concurrent modification
+7. **Buffer Cleanup:** `finally` blocks ensure buffers are released
+
+### Memory Management
+
+Proper resource cleanup is critical:
+- Netty buffers are released in `finally` blocks
+- Light data is cloned (not referenced directly)
+- Empty sections are skipped to reduce memory usage
+- No lingering references to chunk data after method returns
+
+### Packet Size
+
+Typical packet sizes:
+- **Handshake:** 1 byte
+- **LOD Data:** Varies by chunk complexity
+  - Empty chunk: 0 bytes (not sent)
+  - Typical chunk: 10-50 KB
+  - Complex chunk: Up to 200 KB
+
+Factors affecting size:
+- Number of non-empty sections
+- Block state palette size
+- Biome palette size
+- Presence of lighting data
+
+### Thread Safety
+
+All methods are safe to call from the server thread:
+- Serialization occurs on the calling thread
+- Fabric networking handles packet queuing
+- No shared mutable state in `NetworkHandler`
+
+### PlayerTracker Integration
+
+The handler integrates with `PlayerTracker` to track synchronized chunks:
+
+```java
+var synced = PlayerTracker.getInstance().getSyncedChunks(player.getUUID());
+if (synced != null) {
+    synced.add(pos.toLong());
+}
+```
+
+This prevents redundant sends and allows querying which chunks a player has received.
+
+## Client-Side Implementation
+
+The server-side API shown here must be paired with client-side handlers:
+
+```java
+// Client-side registration (example)
+ClientPlayNetworking.registerGlobalReceiver(
+    NetworkHandler.LODDataPayload.TYPE,
+    (payload, context) -> {
+        context.client().execute(() -> {
+            // Deserialize and apply LOD data to client world
+            applyLODData(payload.pos(), payload.sections());
+        });
+    }
+);
+```
+
+<Note>
+  The client-side implementation is not shown here. Refer to the client-side code for details on handling received packets.
+</Note>
+
+## Error Handling
+
+- **Serialization Failures:** Netty buffers are always released, preventing memory leaks
+- **Missing Light Data:** Sent as `null` in payload (handled by nullable fields)
+- **Player Disconnection:** Fabric networking handles gracefully (packets are dropped)
+- **Invalid Registry Access:** Would throw during serialization (bug in calling code)
+
+## Source Reference
+
+See `NetworkHandler.java:23-217` for the complete implementation.

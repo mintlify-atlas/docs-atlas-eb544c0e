@@ -1,0 +1,360 @@
+---
+title: Config
+description: Configuration management for Voxy World Gen V2
+---
+
+The `Config` class provides static methods to load and save configuration data from `config/voxyworldgenv2.json`. It automatically generates a default configuration on first run based on system hardware.
+
+## Static Fields
+
+### DATA
+
+The current configuration data instance.
+
+```java
+public static ConfigData DATA
+```
+
+<ResponseField name="DATA" type="ConfigData">
+  Global configuration data instance. Access fields directly:
+  - `enabled` (boolean) - Master enable switch
+  - `showF3MenuStats` (boolean) - Show stats in F3 debug menu
+  - `generationRadius` (int) - Chunk generation radius around players
+  - `maxActiveTasks` (int) - Maximum concurrent generation tasks
+  - `maxQueueSize` (int) - Maximum queue size (legacy)
+  - `saveNormalChunks` (boolean) - Whether to save generated chunks to disk
+  - `update_interval` (int) - Legacy field for compatibility
+</ResponseField>
+
+**Example:**
+
+```java
+import com.ethan.voxyworldgenv2.core.Config;
+
+// Read config values
+boolean enabled = Config.DATA.enabled;
+int radius = Config.DATA.generationRadius;
+int maxTasks = Config.DATA.maxActiveTasks;
+
+System.out.println("Generation radius: " + radius);
+```
+
+## Static Methods
+
+### load()
+
+Load configuration from disk. If the config file doesn't exist, generates a default configuration based on system hardware and saves it.
+
+```java
+public static void load()
+```
+
+**Behavior:**
+
+- **First run**: Auto-configures based on CPU cores and available memory, then saves
+- **Subsequent runs**: Loads from `config/voxyworldgenv2.json`
+- **On error**: Logs error and retains existing `DATA` values
+
+**Example:**
+
+```java
+// Load config on server startup
+Config.load();
+
+System.out.println("Loaded config with radius: " + Config.DATA.generationRadius);
+```
+
+### save()
+
+Save the current configuration to disk as JSON.
+
+```java
+public static void save()
+```
+
+**Example:**
+
+```java
+import com.ethan.voxyworldgenv2.core.Config;
+import com.ethan.voxyworldgenv2.core.ChunkGenerationManager;
+
+// Modify config
+Config.DATA.generationRadius = 256;
+Config.DATA.maxActiveTasks = 30;
+
+// Save to disk
+Config.save();
+
+// Notify manager to reload
+ChunkGenerationManager.getInstance().scheduleConfigReload();
+```
+
+## ConfigData Class
+
+The `ConfigData` inner class holds all configuration values.
+
+```java
+public static class ConfigData {
+    public boolean enabled = true;
+    public boolean showF3MenuStats = true;
+    public int generationRadius = 128;
+    public int update_interval = 20; // legacy field for Compat
+    public int maxQueueSize = 20000;
+    public int maxActiveTasks = 20;
+    public boolean saveNormalChunks = true;
+}
+```
+
+### Fields
+
+<ParamField path="enabled" type="boolean" default="true">
+  Master enable switch for chunk generation
+</ParamField>
+
+<ParamField path="showF3MenuStats" type="boolean" default="true">
+  Display generation statistics in F3 debug overlay
+</ParamField>
+
+<ParamField path="generationRadius" type="int" default="128">
+  Chunk generation radius around players (in chunks). For Tellus worlds, the effective radius is `max(generationRadius, 128)`
+</ParamField>
+
+<ParamField path="maxActiveTasks" type="int" default="20">
+  Maximum number of concurrent chunk generation tasks. Higher values increase speed but use more resources
+</ParamField>
+
+<ParamField path="maxQueueSize" type="int" default="20000">
+  Legacy field maintained for compatibility
+</ParamField>
+
+<ParamField path="saveNormalChunks" type="boolean" default="true">
+  If `false`, generated chunks are marked as LOD-only and not saved to disk. Useful for reducing world size when using client-side LOD mods
+</ParamField>
+
+<ParamField path="update_interval" type="int" default="20">
+  Legacy field maintained for compatibility
+</ParamField>
+
+## Configuration File Location
+
+The configuration file is located at:
+
+```
+config/voxyworldgenv2.json
+```
+
+Relative to the Minecraft instance directory (typically `.minecraft/` or server root).
+
+## JSON Format
+
+```json
+{
+  "enabled": true,
+  "showF3MenuStats": true,
+  "generationRadius": 128,
+  "update_interval": 20,
+  "maxQueueSize": 20000,
+  "maxActiveTasks": 20,
+  "saveNormalChunks": true
+}
+```
+
+## Usage Examples
+
+### Reading Configuration
+
+```java
+import com.ethan.voxyworldgenv2.core.Config;
+
+public class MyMod {
+    public void checkConfig() {
+        Config.load();
+        
+        if (!Config.DATA.enabled) {
+            System.out.println("Voxy World Gen is disabled");
+            return;
+        }
+        
+        System.out.println("Generation Settings:");
+        System.out.println("  Radius: " + Config.DATA.generationRadius + " chunks");
+        System.out.println("  Max Tasks: " + Config.DATA.maxActiveTasks);
+        System.out.println("  Save Chunks: " + Config.DATA.saveNormalChunks);
+    }
+}
+```
+
+### Modifying Configuration Programmatically
+
+```java
+import com.ethan.voxyworldgenv2.core.Config;
+import com.ethan.voxyworldgenv2.core.ChunkGenerationManager;
+
+public class ConfigHelper {
+    
+    // Set generation radius and apply changes
+    public static void setGenerationRadius(int radius) {
+        Config.DATA.generationRadius = Math.max(16, Math.min(512, radius));
+        Config.save();
+        ChunkGenerationManager.getInstance().scheduleConfigReload();
+    }
+    
+    // Enable/disable generation
+    public static void setEnabled(boolean enabled) {
+        Config.DATA.enabled = enabled;
+        Config.save();
+        ChunkGenerationManager.getInstance().scheduleConfigReload();
+    }
+    
+    // Performance preset
+    public static void applyPerformancePreset(String preset) {
+        switch (preset) {
+            case "low":
+                Config.DATA.maxActiveTasks = 10;
+                Config.DATA.generationRadius = 64;
+                break;
+            case "medium":
+                Config.DATA.maxActiveTasks = 20;
+                Config.DATA.generationRadius = 128;
+                break;
+            case "high":
+                Config.DATA.maxActiveTasks = 40;
+                Config.DATA.generationRadius = 256;
+                break;
+        }
+        
+        Config.save();
+        ChunkGenerationManager.getInstance().scheduleConfigReload();
+    }
+}
+```
+
+### Creating a Config GUI
+
+```java
+import com.ethan.voxyworldgenv2.core.Config;
+import com.ethan.voxyworldgenv2.core.ChunkGenerationManager;
+
+public class ConfigScreen {
+    
+    private int tempRadius;
+    private int tempMaxTasks;
+    private boolean tempSaveChunks;
+    
+    public void open() {
+        // Load current values
+        Config.load();
+        tempRadius = Config.DATA.generationRadius;
+        tempMaxTasks = Config.DATA.maxActiveTasks;
+        tempSaveChunks = Config.DATA.saveNormalChunks;
+        
+        // Show GUI...
+    }
+    
+    public void onSave() {
+        // Apply changes
+        Config.DATA.generationRadius = tempRadius;
+        Config.DATA.maxActiveTasks = tempMaxTasks;
+        Config.DATA.saveNormalChunks = tempSaveChunks;
+        
+        // Save and reload
+        Config.save();
+        ChunkGenerationManager.getInstance().scheduleConfigReload();
+    }
+    
+    public void onCancel() {
+        // Discard changes, reload from disk
+        Config.load();
+    }
+}
+```
+
+### Runtime Configuration Validation
+
+```java
+import com.ethan.voxyworldgenv2.core.Config;
+
+public class ConfigValidator {
+    
+    public static void validateAndFix() {
+        Config.load();
+        
+        boolean needsSave = false;
+        
+        // Clamp generation radius
+        if (Config.DATA.generationRadius < 16) {
+            Config.DATA.generationRadius = 16;
+            needsSave = true;
+        } else if (Config.DATA.generationRadius > 512) {
+            Config.DATA.generationRadius = 512;
+            needsSave = true;
+        }
+        
+        // Clamp max tasks
+        if (Config.DATA.maxActiveTasks < 1) {
+            Config.DATA.maxActiveTasks = 1;
+            needsSave = true;
+        } else if (Config.DATA.maxActiveTasks > 100) {
+            Config.DATA.maxActiveTasks = 100;
+            needsSave = true;
+        }
+        
+        if (needsSave) {
+            Config.save();
+            System.out.println("Fixed invalid config values");
+        }
+    }
+}
+```
+
+## Auto-Configuration
+
+On first run, the mod automatically configures itself based on system resources:
+
+```java
+// From Config.load() source:
+int cores = Runtime.getRuntime().availableProcessors();
+long maxMemory = Runtime.getRuntime().maxMemory() / (1024 * 1024); // MB
+
+// Defaults:
+DATA.maxActiveTasks = 20;
+DATA.generationRadius = 128;
+```
+
+Users can adjust these values through the config file or programmatically.
+
+## Thread Safety
+
+- `load()` and `save()` are NOT thread-safe - call from server thread only
+- Reading `Config.DATA` fields is safe from any thread
+- Modifying `Config.DATA` should be followed by `save()` and `scheduleConfigReload()`
+
+## Best Practices
+
+1. **Always call `scheduleConfigReload()`** after modifying config:
+   ```java
+   Config.DATA.generationRadius = 256;
+   Config.save();
+   ChunkGenerationManager.getInstance().scheduleConfigReload();
+   ```
+
+2. **Validate user input** before applying:
+   ```java
+   int radius = Math.max(16, Math.min(512, userInput));
+   Config.DATA.generationRadius = radius;
+   ```
+
+3. **Load config early** during mod initialization:
+   ```java
+   @Override
+   public void onInitialize() {
+       Config.load();
+       // Other initialization...
+   }
+   ```
+
+4. **Don't modify during generation** - use `scheduleConfigReload()` to apply changes safely on the next tick
+
+## See Also
+
+- [ChunkGenerationManager API](/api/chunk-generation-manager) - Core generation manager
+- [Configuration Guide](/configuration/overview) - User-facing configuration guide

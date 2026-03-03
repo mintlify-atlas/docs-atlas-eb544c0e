@@ -1,0 +1,418 @@
+---
+title: Performance Optimization
+description: Optimize Voxy World Gen V2 for your hardware and workload
+---
+
+## Understanding Performance Factors
+
+Voxy World Gen V2's performance depends on three key systems:
+
+1. **Chunk generation pipeline** - Controlled by `maxActiveTasks` in config
+2. **TPS monitoring** - Automatic throttling when server performance drops
+3. **Hardware resources** - CPU cores and RAM directly impact generation speed
+
+## Configuration Parameters
+
+### maxActiveTasks
+
+Controls how many chunks can generate simultaneously. This is the primary performance tuning knob.
+
+**Location:** `config/voxyworldgenv2.json`
+
+```json
+{
+  "maxActiveTasks": 20
+}
+```
+
+<Tip>
+The default value is 20, auto-configured on first run based on your hardware.
+</Tip>
+
+**How it works:** The system uses a semaphore-based throttle (see `ChunkGenerationManager.java:109`) that limits concurrent generation tasks. Each chunk generation acquires a permit, and releases it when complete.
+
+**Tuning guidelines:**
+
+<AccordionGroup>
+  <Accordion title="High-end server (16+ cores, 16GB+ RAM)">
+    **Recommended:** 32-48 tasks
+    
+    ```json
+    {
+      "maxActiveTasks": 40
+    }
+    ```
+    
+    Higher parallelism takes full advantage of many cores. Monitor TPS - if throttling occurs frequently, reduce this value.
+  </Accordion>
+
+  <Accordion title="Mid-range server (8-16 cores, 8-16GB RAM)">
+    **Recommended:** 20-32 tasks
+    
+    ```json
+    {
+      "maxActiveTasks": 24
+    }
+    ```
+    
+    Default settings work well. Increase gradually while monitoring TPS.
+  </Accordion>
+
+  <Accordion title="Budget server or shared hosting (4-8 cores, 4-8GB RAM)">
+    **Recommended:** 8-16 tasks
+    
+    ```json
+    {
+      "maxActiveTasks": 12
+    }
+    ```
+    
+    Lower values prevent overwhelming limited resources. Generation will be slower but stable.
+  </Accordion>
+
+  <Accordion title="Tellus integration enabled">
+    **Recommended:** Increase by 50-100%
+    
+    ```json
+    {
+      "maxActiveTasks": 60
+    }
+    ```
+    
+    Tellus uses optimized fast generation (see `ChunkGenerationManager.java:274`). It can handle much higher concurrency efficiently.
+  </Accordion>
+</AccordionGroup>
+
+### generationRadius
+
+Defines how far from players to generate chunks (in chunks, not blocks).
+
+```json
+{
+  "generationRadius": 128
+}
+```
+
+**Impact on performance:**
+- **Radius 64:** ~12,800 chunks to generate per player
+- **Radius 128:** ~51,200 chunks (default)
+- **Radius 256:** ~204,800 chunks
+
+<Warning>
+For Tellus worlds, the generation radius is automatically increased to at least 128 chunks (see `ChunkGenerationManager.java:185`) to ensure sufficient LOD coverage.
+</Warning>
+
+**Tuning guidelines:**
+- Start with 128 for balanced LOD coverage
+- Reduce to 64 if initial generation takes too long
+- Increase to 256+ only on high-end hardware for maximum view distance
+
+### saveNormalChunks
+
+Controls whether generated LOD chunks are saved to disk.
+
+```json
+{
+  "saveNormalChunks": true
+}
+```
+
+**When to disable (`false`):**
+- You want minimal disk usage
+- You're generating purely for LOD visualization with Voxy
+- You don't need chunks to persist when unloaded
+
+**Implementation:** When disabled, chunks are marked as "unsaved" (see `ChunkGenerationManager.java:326`) and tracked by `LodChunkTracker`. They're kept in memory only and discarded when outside player view distance.
+
+**Disk savings:** Approximately 95% reduction in world save size for generated-only chunks.
+
+<Tip>
+Check the "lod suppressed" counter in F3 debug stats (line 68 of `DebugRenderer.java`) to see how many chunk saves were skipped.
+</Tip>
+
+## TPS Monitoring and Throttling
+
+The mod includes automatic performance protection via `TpsMonitor`.
+
+### How it works
+
+1. Tracks the last 20 server tick times (see `TpsMonitor.java:7`)
+2. Calculates average MSPT (milliseconds per tick)
+3. If MSPT exceeds 55.5ms (~18 TPS threshold), generation is **paused**
+4. Resumes when TPS recovers
+
+**Code reference:** `TpsMonitor.java:14` sets `MSPT_THRESHOLD = 1000.0 / 18.0`
+
+### Monitoring throttling
+
+**F3 Debug Stats:**
+Press F3 to see generation status in bottom-right corner:
+
+```
+[voxy worldgen v2] running      ← Normal operation
+[voxy worldgen v2] throttled    ← TPS protection active
+```
+
+When throttled:
+1. Worker thread sleeps for 500ms (see `ChunkGenerationManager.java:169`)
+2. No new chunks are queued
+3. Active generation completes normally
+
+<Warning>
+Persistent throttling means `maxActiveTasks` is too high for your hardware. Reduce it by 25-50% and reload config.
+</Warning>
+
+## Hardware Considerations
+
+### CPU Cores
+
+Chunk generation is highly parallel. More cores = faster generation.
+
+**Scaling:**
+- 4 cores: Baseline (can support ~8-12 tasks)
+- 8 cores: Good (20-24 tasks)
+- 16+ cores: Excellent (32-48 tasks)
+
+**Why:** Each chunk generation runs in Minecraft's server executor pool. The mod's worker thread (see `ChunkGenerationManager.java:141`) dispatches work, but actual generation uses server threads.
+
+### RAM
+
+Chunk generation is memory-intensive.
+
+**Requirements:**
+- **Minimum:** 4GB allocated to Minecraft
+- **Recommended:** 8GB+ for large generation radii
+- **Optimal:** 12GB+ with `saveNormalChunks: false` (keeps more chunks in memory)
+
+**Memory usage formula:**
+```
+Active chunk memory ≈ maxActiveTasks × 50KB
+```
+
+For 40 tasks: ~2MB active generation overhead (negligible compared to chunk storage).
+
+### Disk I/O
+
+With `saveNormalChunks: true`, disk speed matters.
+
+- **HDD:** Bottleneck above 20 tasks due to write latency
+- **SSD:** Handles 40+ tasks easily
+- **NVMe:** No disk bottleneck, even at 60+ tasks
+
+## Recommended Settings by Scenario
+
+### Solo world, fast initial generation
+
+```json
+{
+  "enabled": true,
+  "maxActiveTasks": 40,
+  "generationRadius": 128,
+  "saveNormalChunks": false
+}
+```
+
+**Why:**
+- High task count for speed
+- Standard radius for good LOD coverage  
+- No saves = minimal disk usage and faster generation
+
+### Multiplayer server, balanced performance
+
+```json
+{
+  "enabled": true,
+  "maxActiveTasks": 24,
+  "generationRadius": 128,
+  "saveNormalChunks": true
+}
+```
+
+**Why:**
+- Moderate task count leaves headroom for players
+- Saves enabled so chunks persist for all players
+
+### Budget server, stability priority
+
+```json
+{
+  "enabled": true,
+  "maxActiveTasks": 12,
+  "generationRadius": 64,
+  "saveNormalChunks": true
+}
+```
+
+**Why:**
+- Low task count prevents server overload
+- Smaller radius = less total work
+- Saves enabled for data persistence
+
+### Tellus world, maximum LOD range
+
+```json
+{
+  "enabled": true,
+  "maxActiveTasks": 60,
+  "generationRadius": 256,
+  "saveNormalChunks": false
+}
+```
+
+**Why:**
+- Tellus fast generation supports high concurrency
+- Large radius for distant mountain/terrain LODs
+- No saves (Tellus regenerates efficiently)
+
+## Live Configuration Reload
+
+You can reload config without restarting the server.
+
+<Steps>
+  <Step title="Edit the config file">
+    Modify `config/voxyworldgenv2.json` while server is running
+  </Step>
+  
+  <Step title="Trigger reload">
+    The mod automatically detects config changes on the next tick cycle. Alternatively, use ModMenu's config screen (if installed) and click "Save".
+  </Step>
+  
+  <Step title="Verify reload">
+    Check server logs for:
+    ```
+    [voxy worldgen] Config reloaded
+    ```
+  </Step>
+</Steps>
+
+**Implementation:** `ChunkGenerationManager.java:357-361` handles config reload scheduling:
+
+```java
+if (configReloadScheduled.compareAndSet(true, false)) {
+    Config.load();
+    updateThrottleCapacity();
+    restartScan();
+}
+```
+
+## Monitoring Generation Progress
+
+### F3 Debug Statistics
+
+Enable `showF3MenuStats` in config (enabled by default):
+
+```json
+{
+  "showF3MenuStats": true
+}
+```
+
+**What you see (bottom-right corner):**
+
+```
+[voxy worldgen v2] running
+completed: 45.2K
+skipped: 1.3K
+remaining: 5847 (3m 12s)
+active: 24
+rate: 25.3 c/s
+voxy: enabled
+```
+
+**Field explanations:**
+- **completed:** Chunks generated and ingested into Voxy
+- **skipped:** Chunks that already existed (loaded from saves)
+- **remaining:** Chunks left to generate in current radius + ETA
+- **active:** Current `maxActiveTasks` in use
+- **rate:** Chunks per second (rolling 10-second average, see `GenerationStats.java:28-62`)
+- **voxy:** Voxy mod integration status
+
+### Generation Rate Benchmarks
+
+Expected rates for different hardware:
+
+- **Budget (4 cores):** 8-15 c/s
+- **Mid-range (8 cores):** 20-35 c/s  
+- **High-end (16+ cores):** 40-80 c/s
+- **Tellus worlds:** 2-3× faster than normal generation
+
+<Tip>
+If your rate is significantly below these benchmarks, you're either throttled (check status), or `maxActiveTasks` is too low for your hardware.
+</Tip>
+
+## Advanced: Multi-Dimensional Optimization
+
+The mod generates chunks per-dimension, switching based on where most players are.
+
+**Dimension priority logic (see `ChunkGenerationManager.java:409-423`):**
+
+1. Count players in each dimension
+2. Switch to dimension with **majority** of players
+3. Save progress for previous dimension
+4. Load completion cache for new dimension
+
+**Optimization:** If you have players split across dimensions (Overworld + Nether), generation focuses on whichever has more players. To force Overworld generation, have all players stay there until complete.
+
+## Troubleshooting Poor Performance
+
+<AccordionGroup>
+  <Accordion title="Generation is slow (< 10 c/s)">
+    **Causes:**
+    1. `maxActiveTasks` too low → increase by 50%
+    2. TPS throttling active → reduce `maxActiveTasks`
+    3. Disk bottleneck → use SSD or disable `saveNormalChunks`
+    4. CPU bottleneck → check if other processes are using CPU
+    
+    **Check:** Look at F3 stats for throttling status
+  </Accordion>
+
+  <Accordion title="Server TPS drops below 15">
+    **Cause:** `maxActiveTasks` overwhelming server
+    
+    **Fix:**
+    1. Reduce `maxActiveTasks` by 50%
+    2. Reload config (edit and save `voxyworldgenv2.json`)
+    3. TPS should recover within 30 seconds
+    
+    The mod will auto-throttle, but reducing tasks prevents the issue.
+  </Accordion>
+
+  <Accordion title="High memory usage or OutOfMemoryError">
+    **Causes:**
+    1. `generationRadius` too large for available RAM
+    2. Too many active chunks in memory
+    
+    **Fix:**
+    1. Reduce `generationRadius` to 64 or 96
+    2. Enable `saveNormalChunks: true` (offloads to disk)
+    3. Allocate more RAM to Minecraft (increase `-Xmx` JVM arg)
+  </Accordion>
+
+  <Accordion title="Chunks generate but don't appear in Voxy">
+    **Not a performance issue** - see [Troubleshooting Guide](/guides/troubleshooting)
+  </Accordion>
+</AccordionGroup>
+
+## Performance Monitoring Checklist
+
+Run this checklist when optimizing:
+
+- [ ] Check F3 stats for throttling
+- [ ] Monitor server TPS (should stay above 18)
+- [ ] Verify generation rate matches hardware tier
+- [ ] Check disk I/O utilization (should be < 80%)
+- [ ] Confirm RAM usage is stable (not growing unbounded)
+- [ ] Test config changes incrementally (±25% at a time)
+- [ ] Wait 2-5 minutes after config changes to see effects
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Solve common issues and debug problems
+  </Card>
+  
+  <Card title="Multiplayer Setup" icon="users" href="/guides/multiplayer">
+    Optimize for dedicated servers and player load
+  </Card>
+</CardGroup>
