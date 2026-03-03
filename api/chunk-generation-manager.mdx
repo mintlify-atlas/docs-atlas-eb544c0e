@@ -25,6 +25,28 @@ public static ChunkGenerationManager getInstance()
 ChunkGenerationManager manager = ChunkGenerationManager.getInstance();
 ```
 
+
+### getCurrentLevel()
+
+Get the current active dimension level that generation is focused on.
+
+```java
+public ServerLevel getCurrentLevel()
+```
+
+<ResponseField name="return" type="ServerLevel">
+  The current ServerLevel, or null if no dimension is active
+</ResponseField>
+
+**Example:**
+
+```java
+ServerLevel level = manager.getCurrentLevel();
+if (level != null) {
+    System.out.println("Generating in: " + level.dimension().location());
+}
+```
+
 ## Lifecycle Methods
 
 ### initialize()
