@@ -1,0 +1,118 @@
+{
+  "projectType": "framework",
+  "projectName": "Voxy World Gen V2",
+  "projectDescription": "High-performance passive chunk generation mod for Minecraft with Voxy and Tellus integration",
+  "theme": "aspen",
+  "primaryColor": "#2E7D32",
+  "lightColor": "#66BB6A",
+  "darkColor": "#1B5E20",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/chunk-generation",
+              "concepts/lod-system",
+              "concepts/performance"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/settings",
+              "configuration/advanced"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/voxy",
+              "integrations/tellus",
+              "integrations/modmenu"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/optimization",
+              "guides/troubleshooting",
+              "guides/multiplayer"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/chunk-generation-manager",
+              "api/config",
+              "api/player-tracker"
+            ]
+          },
+          {
+            "group": "Integration API",
+            "pages": [
+              "api/voxy-integration",
+              "api/tellus-integration",
+              "api/network-handler"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "api/mixins",
+              "api/events",
+              "api/distance-graph"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "High-performance background chunk generation",
+    "Voxy renderer integration for LOD support",
+    "Tellus world generator compatibility",
+    "Configurable generation radius and performance settings",
+    "Client-server chunk synchronization",
+    "Dynamic chunk saving with LOD optimization",
+    "TPS-aware throttling system",
+    "Multi-dimensional support"
+  ],
+  "publicApiSurface": [
+    "ChunkGenerationManager.getInstance()",
+    "ChunkGenerationManager.initialize(MinecraftServer)",
+    "ChunkGenerationManager.shutdown()",
+    "ChunkGenerationManager.tick()",
+    "Config.load()",
+    "Config.save()",
+    "Config.DATA",
+    "VoxyIntegration.ingestChunk(LevelChunk)",
+    "VoxyIntegration.rawIngest(LevelChunk, DataLayer)",
+    "VoxyIntegration.isVoxyAvailable()",
+    "TellusIntegration.isTellusWorld(ServerLevel)",
+    "TellusIntegration.enqueueGenerate(ServerLevel, ChunkPos, Runnable)",
+    "NetworkHandler.broadcastLODData(LevelChunk)",
+    "NetworkHandler.sendLODData(ServerPlayer, LevelChunk)",
+    "NetworkHandler.sendHandshake(ServerPlayer)",
+    "PlayerTracker.getInstance()",
+    "LodChunkTracker.getInstance()",
+    "GenerationStats"
+  ]
+}
